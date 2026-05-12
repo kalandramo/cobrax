@@ -1,0 +1,450 @@
+package cobrax
+
+import (
+	"encoding/json"
+	"slices"
+	"testing"
+
+	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// hasSchemaType checks if a schema has the specified type.
+// In jsonschema-go v0.4.2+, nullable types use Types []string instead of Type string.
+// For example, []string with omitempty becomes Types: ["null", "array"] instead of Type: "array".
+func hasSchemaType(schema *jsonschema.Schema, expectedType string) bool {
+	if schema.Type == expectedType {
+		return true
+	}
+	return slices.Contains(schema.Types, expectedType)
+}
+
+// buildCommandTree creates a command tree from a list of command names.
+// The first command becomes the root, and subsequent commands are nested.
+func buildCommandTree(names ...string) *cobra.Command {
+	if len(names) == 0 {
+		return nil
+	}
+
+	root := &cobra.Command{Use: names[0]}
+	parent := root
+
+	for _, name := range names[1:] {
+		child := &cobra.Command{
+			Use: name,
+			Run: func(_ *cobra.Command, _ []string) {},
+		}
+
+		parent.AddCommand(child)
+		parent = child
+	}
+
+	return parent
+}
+
+type SomeJSONObject struct {
+	Foo    string
+	Bar    int
+	FooBar struct {
+		Baz string
+	}
+}
+
+type SomeJSONArray []SomeJSONObject
+
+// parseRawInputSchema deserializes the tool's RawInputSchema into a jsonschema.Schema.
+func parseRawInputSchema(t *testing.T, rawSchema json.RawMessage) *jsonschema.Schema {
+	t.Helper()
+	require.NotNil(t, rawSchema, "RawInputSchema must not be nil")
+	var schema jsonschema.Schema
+	require.NoError(t, json.Unmarshal(rawSchema, &schema))
+	return &schema
+}
+
+func TestCreateToolFromCmd(t *testing.T) {
+	// Create a simple test command
+	cmd := &cobra.Command{
+		Use:     "test [file]",
+		Short:   "Test command",
+		Long:    "This is a test command for testing the cobrax package",
+		Example: "test file.txt --output result.txt",
+	}
+
+	// Add some flags
+	cmd.Flags().String("output", "", "Output file")
+	cmd.Flags().Bool("verbose", false, "Verbose output")
+	cmd.Flags().IntSlice("include", []int{}, "Include patterns")
+	cmd.Flags().StringSlice("greeting", []string{"hello", "world"}, "Include patterns")
+	cmd.Flags().Int("count", 10, "Number of items")
+	cmd.Flags().StringToString("labels", map[string]string{"hello": "world", "go": "lang"}, "Key-value labels")
+	cmd.Flags().StringToInt("ports", map[string]int{"life": 42, "power": 9001}, "Port mappings")
+
+	// generate schema for a test object
+	aJSONObjSchema, err := jsonschema.For[SomeJSONObject](nil)
+	require.NoError(t, err)
+	bytes, err := aJSONObjSchema.MarshalJSON()
+	require.NoError(t, err)
+
+	// now create flag that has a json schema that represents a json object
+	cmd.Flags().String("a_json_obj", "", "Some JSON Object")
+	jsonobj := cmd.Flags().Lookup("a_json_obj")
+	jsonobj.Annotations = make(map[string][]string)
+	jsonobj.Annotations["jsonschema"] = []string{string(bytes)}
+
+	// generate schema for a test array
+	aJSONArraySchema, err := jsonschema.For[SomeJSONArray](nil)
+	require.NoError(t, err)
+	bytes, err = aJSONArraySchema.MarshalJSON()
+	require.NoError(t, err)
+
+	// now create flag that has a json schema that represents a json array
+	// note that we can supply a default for the flag here but it's not mapped to the schema default
+	cmd.Flags().String("a_json_array", "[]", "Some JSON Array")
+	jsonarray := cmd.Flags().Lookup("a_json_array")
+	jsonarray.Annotations = make(map[string][]string)
+	jsonarray.Annotations["jsonschema"] = []string{string(bytes)}
+
+	// Add a hidden flag
+	cmd.Flags().String("hidden", "secret", "Hidden flag")
+	err = cmd.Flags().MarkHidden("hidden")
+	require.NoError(t, err)
+
+	// Add a deprecated flag
+	cmd.Flags().String("old", "", "Old flag")
+	err = cmd.Flags().MarkDeprecated("old", "Use --new instead")
+	require.NoError(t, err)
+
+	// Mark one flag as required
+	err = cmd.MarkFlagRequired("count")
+	require.NoError(t, err)
+
+	parent := &cobra.Command{
+		Use:   "parent",
+		Short: "Parent command",
+	}
+
+	// add persistent flag to parent
+	parent.PersistentFlags().String("config", "", "Config file")
+	parent.AddCommand(cmd)
+
+	t.Run("Default Selector", func(t *testing.T) {
+		// Create tool from command with a selector that accepts all flags
+		tool := Selector{}.createToolFromCmd(cmd, "parent")
+
+		// Verify tool properties
+		assert.Equal(t, "parent_test", tool.Name)
+		assert.Contains(t, tool.Description, "This is a test command")
+		assert.Contains(t, tool.Description, "test file.txt --output result.txt")
+		assert.NotNil(t, tool.RawInputSchema)
+
+		// Parse the raw input schema for inspection.
+		inputSchema := parseRawInputSchema(t, tool.RawInputSchema)
+		assert.Equal(t, "object", inputSchema.Type)
+		require.NotNil(t, inputSchema.Properties)
+		assert.Contains(t, inputSchema.Properties, "flags")
+		// cmd.Use = "test [file]" → named arg token → "positional_args" replaces "args"
+		assert.Contains(t, inputSchema.Properties, "positional_args")
+		assert.NotContains(t, inputSchema.Properties, "args")
+
+		// Verify flags schema
+		flagsSchema := inputSchema.Properties["flags"]
+		require.NotNil(t, flagsSchema.Properties)
+		assert.Contains(t, flagsSchema.Properties, "output")
+		assert.Contains(t, flagsSchema.Properties, "verbose")
+		assert.Contains(t, flagsSchema.Properties, "include")
+		assert.Contains(t, flagsSchema.Properties, "count")
+		assert.Contains(t, flagsSchema.Properties, "greeting")
+		assert.Contains(t, flagsSchema.Properties, "labels")
+		assert.Contains(t, flagsSchema.Properties, "ports")
+		assert.Contains(t, flagsSchema.Properties, "a_json_obj")
+		assert.Contains(t, flagsSchema.Properties, "a_json_array")
+
+		// Verify excluded flags
+		assert.NotContains(t, flagsSchema.Properties, "hidden", "Should not include hidden flag")
+		assert.NotContains(t, flagsSchema.Properties, "old", "Should not include deprecated flag")
+
+		// Verify flag types
+		assert.Equal(t, "string", flagsSchema.Properties["output"].Type)
+		assert.Equal(t, "boolean", flagsSchema.Properties["verbose"].Type)
+		assert.Equal(t, "array", flagsSchema.Properties["include"].Type)
+		assert.Equal(t, "integer", flagsSchema.Properties["count"].Type)
+		assert.Equal(t, "array", flagsSchema.Properties["greeting"].Type)
+		assert.Equal(t, "object", flagsSchema.Properties["labels"].Type)
+		assert.Equal(t, "object", flagsSchema.Properties["ports"].Type)
+		assert.Equal(t, "object", flagsSchema.Properties["a_json_obj"].Type)
+		assert.True(t, hasSchemaType(flagsSchema.Properties["a_json_array"], "array"), "a_json_array should be an array type")
+
+		// Verify required flags
+		require.Len(t, flagsSchema.Required, 1, "Should have 1 required flag")
+		assert.Contains(t, flagsSchema.Required, "count", "count flag should be marked as required")
+
+		// Verify default values
+		assert.NotNil(t, flagsSchema.Properties["verbose"].Default)
+		assert.JSONEq(t, "false", string(flagsSchema.Properties["verbose"].Default))
+		assert.NotNil(t, flagsSchema.Properties["count"].Default)
+		assert.JSONEq(t, "10", string(flagsSchema.Properties["count"].Default))
+		assert.NotNil(t, flagsSchema.Properties["greeting"].Default)
+		assert.JSONEq(t, `["hello","world"]`, string(flagsSchema.Properties["greeting"].Default))
+		assert.JSONEq(t, `{"life":42, "power":9001}`, string(flagsSchema.Properties["ports"].Default))
+		assert.JSONEq(t, `{"hello":"world", "go":"lang"}`, string(flagsSchema.Properties["labels"].Default))
+		// Empty string and empty array should not have defaults set
+		assert.Nil(t, flagsSchema.Properties["output"].Default)
+		assert.Nil(t, flagsSchema.Properties["include"].Default)
+
+		// json schema defaults are not populated
+		assert.Nil(t, flagsSchema.Properties["a_json_obj"].Default)
+		assert.Nil(t, flagsSchema.Properties["a_json_array"].Default)
+
+		// verify json obj schemas - compare key fields rather than full schema
+		// because PropertyOrder handling changed between jsonschema-go versions
+		parsedJSONObjSchema := flagsSchema.Properties["a_json_obj"]
+		assert.Equal(t, aJSONObjSchema.Type, parsedJSONObjSchema.Type)
+		assert.Equal(t, aJSONObjSchema.Required, parsedJSONObjSchema.Required)
+		assert.Equal(t, len(aJSONObjSchema.Properties), len(parsedJSONObjSchema.Properties))
+
+		// Verify array items schema
+		includeSchema := flagsSchema.Properties["include"]
+		assert.NotNil(t, includeSchema.Items)
+		assert.Equal(t, "integer", includeSchema.Items.Type)
+		greetingSchema := flagsSchema.Properties["greeting"]
+		assert.NotNil(t, greetingSchema.Items)
+		assert.Equal(t, "string", greetingSchema.Items.Type)
+
+		// Verify stringToString object schema
+		labelsSchema := flagsSchema.Properties["labels"]
+		assert.NotNil(t, labelsSchema.AdditionalProperties)
+		assert.Equal(t, "string", labelsSchema.AdditionalProperties.Type)
+
+		// Verify stringToInt object schema
+		portsSchema := flagsSchema.Properties["ports"]
+		assert.NotNil(t, portsSchema.AdditionalProperties)
+		assert.Equal(t, "integer", portsSchema.AdditionalProperties.Type)
+
+		// Verify persistent flag from parent command
+		assert.Contains(t, flagsSchema.Properties, "config", "Should include persistent flag from parent command")
+
+		// Verify positional args schema.
+		// cmd.Use = "test [file]" → parsed as optional named arg "file"
+		// → schema uses "positional_args" object, "args" is removed.
+		assert.Contains(t, inputSchema.Properties, "positional_args",
+			"Should have positional_args when cmd.Use has named arg tokens")
+		assert.NotContains(t, inputSchema.Properties, "args",
+			"args array should be removed when positional_args object is present")
+
+		positionalSchema := inputSchema.Properties["positional_args"]
+		assert.Equal(t, "object", positionalSchema.Type)
+		require.NotNil(t, positionalSchema.Properties)
+		assert.Contains(t, positionalSchema.Properties, "file",
+			"positional_args should have a 'file' property matching the [file] token")
+
+		fileArgSchema := positionalSchema.Properties["file"]
+		assert.Equal(t, "string", fileArgSchema.Type)
+		// [file] is optional → not in Required list
+		assert.NotContains(t, positionalSchema.Required, "file",
+			"Optional arg [file] should not be required")
+	})
+
+	t.Run("Restricted Selector", func(t *testing.T) {
+		// Create a selector that only allows specific flags
+		selector := Selector{
+			LocalFlagSelector: func(flag *pflag.Flag) bool {
+				names := []string{"output", "verbose", "hidden", "old"}
+				return slices.Contains(names, flag.Name)
+			},
+			InheritedFlagSelector: func(_ *pflag.Flag) bool { return false },
+		}
+
+		// Create tool from command with the restricted selector
+		tool := selector.createToolFromCmd(cmd, "parent")
+
+		// Verify tool properties
+		assert.Equal(t, "parent_test", tool.Name)
+		assert.Contains(t, tool.Description, "This is a test command")
+		assert.Contains(t, tool.Description, "test file.txt --output result.txt")
+		assert.NotNil(t, tool.RawInputSchema)
+
+		// Parse the raw input schema for inspection.
+		inputSchema := parseRawInputSchema(t, tool.RawInputSchema)
+		assert.Equal(t, "object", inputSchema.Type)
+		require.NotNil(t, inputSchema.Properties)
+		assert.Contains(t, inputSchema.Properties, "flags")
+
+		// Verify flags schema
+		flagsSchema := inputSchema.Properties["flags"]
+		require.NotNil(t, flagsSchema.Properties)
+		assert.Contains(t, flagsSchema.Properties, "output")
+		assert.Contains(t, flagsSchema.Properties, "verbose")
+
+		// Verify excluded flags
+		assert.NotContains(t, flagsSchema.Properties, "hidden", "Should not include hidden flag")
+		assert.NotContains(t, flagsSchema.Properties, "old", "Should not include deprecated flag")
+		assert.NotContains(t, flagsSchema.Properties, "include", "Should not include excluded flag")
+		assert.NotContains(t, flagsSchema.Properties, "count", "Should not include excluded flag")
+		assert.NotContains(t, flagsSchema.Properties, "config", "Should not include excluded persistent flag")
+		assert.NotContains(t, flagsSchema.Properties, "greeting", "Should not include excluded flag")
+		assert.NotContains(t, flagsSchema.Properties, "labels", "Should not include excluded flag")
+		assert.NotContains(t, flagsSchema.Properties, "ports", "Should not include excluded flag")
+
+		// Verify required flags - none should be required since 'count' was excluded
+		require.Empty(t, flagsSchema.Required, "Should have no required flags")
+
+		// cmd.Use = "test [file]" → positional_args object schema
+		assert.Contains(t, inputSchema.Properties, "positional_args")
+		assert.NotContains(t, inputSchema.Properties, "args")
+	})
+
+	t.Run("No positional args - legacy args array", func(t *testing.T) {
+		// A command with no positional argument tokens in cmd.Use should
+		// retain the legacy "args" array property.
+		noArgCmd := &cobra.Command{
+			Use:   "noarg",
+			Short: "No positional args",
+			Run:   func(_ *cobra.Command, _ []string) {},
+		}
+		tool := Selector{}.createToolFromCmd(noArgCmd, "root")
+		schema := parseRawInputSchema(t, tool.RawInputSchema)
+		assert.Contains(t, schema.Properties, "args",
+			"Should keep legacy args when no named arg tokens in cmd.Use")
+		assert.NotContains(t, schema.Properties, "positional_args",
+			"Should not have positional_args when cmd.Use has no named arg tokens")
+		argsSchema := schema.Properties["args"]
+		assert.True(t, hasSchemaType(argsSchema, "array"), "args should be an array type")
+	})
+
+	t.Run("Required positional arg", func(t *testing.T) {
+		reqArgCmd := &cobra.Command{
+			Use:   "create <name>",
+			Short: "Create something",
+			Run:   func(_ *cobra.Command, _ []string) {},
+		}
+		tool := Selector{}.createToolFromCmd(reqArgCmd, "root")
+		schema := parseRawInputSchema(t, tool.RawInputSchema)
+		positional := schema.Properties["positional_args"]
+		require.NotNil(t, positional)
+		assert.Contains(t, positional.Required, "name",
+			"Required arg <name> should be in Required list")
+	})
+
+	t.Run("Variadic positional arg", func(t *testing.T) {
+		varArgCmd := &cobra.Command{
+			Use:   "run <targets...>",
+			Short: "Run targets",
+			Run:   func(_ *cobra.Command, _ []string) {},
+		}
+		tool := Selector{}.createToolFromCmd(varArgCmd, "root")
+		schema := parseRawInputSchema(t, tool.RawInputSchema)
+		positional := schema.Properties["positional_args"]
+		require.NotNil(t, positional)
+		require.Contains(t, positional.Properties, "targets")
+		assert.Equal(t, "array", positional.Properties["targets"].Type,
+			"Variadic arg should be an array type")
+		assert.Contains(t, positional.Required, "targets")
+	})
+
+	t.Run("Positional arg with annotation description", func(t *testing.T) {
+		annotCmd := &cobra.Command{
+			Use:   "oncall <module> [title]",
+			Short: "Create on-call ticket",
+			Run:   func(_ *cobra.Command, _ []string) {},
+			Annotations: map[string]string{
+				AnnotationArgPrefix + "0": "The on-call module name (e.g. 'bke', 'kafka')",
+				AnnotationArgPrefix + "1": "Brief title describing the incident",
+			},
+		}
+		tool := Selector{}.createToolFromCmd(annotCmd, "root")
+		schema := parseRawInputSchema(t, tool.RawInputSchema)
+		positional := schema.Properties["positional_args"]
+		require.NotNil(t, positional)
+		require.Contains(t, positional.Properties, "module")
+		require.Contains(t, positional.Properties, "title")
+		assert.Equal(t, "The on-call module name (e.g. 'bke', 'kafka')",
+			positional.Properties["module"].Description)
+		assert.Equal(t, "Brief title describing the incident",
+			positional.Properties["title"].Description)
+		assert.Contains(t, positional.Required, "module")
+		assert.NotContains(t, positional.Required, "title")
+	})
+}
+
+func TestGenerateToolName(t *testing.T) {
+	root := &cobra.Command{
+		Use: "root",
+	}
+	child := &cobra.Command{
+		Use: "child",
+	}
+	grandchild := &cobra.Command{
+		Use: "grandchild",
+	}
+
+	root.AddCommand(child)
+	child.AddCommand(grandchild)
+
+	t.Run("Default prefix (uses root name)", func(t *testing.T) {
+		name := toolName(grandchild, "root")
+		assert.Equal(t, "root_child_grandchild", name)
+	})
+
+	t.Run("Custom short prefix", func(t *testing.T) {
+		name := toolName(grandchild, "r")
+		assert.Equal(t, "r_child_grandchild", name)
+	})
+
+	t.Run("Root command only", func(t *testing.T) {
+		name := toolName(root, "root")
+		assert.Equal(t, "root", name)
+	})
+
+	t.Run("Root command with custom prefix", func(t *testing.T) {
+		name := toolName(root, "myprefix")
+		assert.Equal(t, "myprefix", name)
+	})
+
+	t.Run("Omnistrate use case - shortening long tool names", func(t *testing.T) {
+		// Simulates: omnistrate-ctl cost by-instance-type in-provider
+		omctl := &cobra.Command{Use: "omnistrate-ctl"}
+		cost := &cobra.Command{Use: "cost"}
+		byInstanceType := &cobra.Command{Use: "by-instance-type"}
+		inProvider := &cobra.Command{Use: "in-provider", Run: func(_ *cobra.Command, _ []string) {}}
+
+		omctl.AddCommand(cost)
+		cost.AddCommand(byInstanceType)
+		byInstanceType.AddCommand(inProvider)
+
+		// Using full root name (original behavior)
+		fullName := toolName(inProvider, "omnistrate-ctl")
+		assert.Equal(t, "omnistrate-ctl_cost_by-instance-type_in-provider", fullName)
+
+		// Using shortened prefix - saves 9 characters (len("omnistrate-ctl") - len("omctl") = 14 - 5 = 9)
+		shortName := toolName(inProvider, "omctl")
+		assert.Equal(t, "omctl_cost_by-instance-type_in-provider", shortName)
+		assert.Less(t, len(shortName), len(fullName), "Short name should be shorter than full name")
+		assert.Less(t, len(shortName), 64, "Short name should be under Claude's 64-char limit")
+	})
+}
+
+func TestGenerateToolDescription(t *testing.T) {
+	t.Run("Long and Example", func(t *testing.T) {
+		cmd1 := &cobra.Command{
+			Use:     "cmd1",
+			Short:   "Short description",
+			Long:    "Long description of cmd1",
+			Example: "cmd1 --help",
+		}
+		desc1 := toolDescription(cmd1)
+		assert.Contains(t, desc1, "Long description of cmd1")
+		assert.Contains(t, desc1, "Examples:\ncmd1 --help")
+	})
+
+	t.Run("Short only", func(t *testing.T) {
+		cmd2 := &cobra.Command{
+			Use:   "cmd2",
+			Short: "Short description of cmd2",
+		}
+		desc2 := toolDescription(cmd2)
+		assert.Equal(t, "Short description of cmd2", desc2)
+	})
+}
