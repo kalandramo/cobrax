@@ -254,7 +254,6 @@ func (s *MCPServer) registerToolsRecursive(cmd *cobra.Command) {
 
 		// Store the cobra command path segments for this tool.
 		s.toolPaths[tool.Name] = cmdPath
-		fmt.Println("22222222222222222222222222222222222222222222", cmd.CommandPath(), "|", tool.Name, "|", cmdPath)
 
 		// Capture sel and cmd in a closure for the tool handler.
 		handler := s.makeInProcessHandler(sel, cmd)
