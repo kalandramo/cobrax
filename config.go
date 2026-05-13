@@ -205,22 +205,17 @@ func (c *Config) cmdFilter(cmd *cobra.Command) bool {
 }
 
 // decodeToolInput extracts a ToolInput from a mark3labs CallToolRequest.
-// The MCP client sends the arguments as a flat map with "flags",
-// "positional_args", and "args" keys matching the ToolInput schema.
+// The MCP client sends the arguments as a flat map with "flags" and "args"
+// keys matching the ToolInput schema.
 func decodeToolInput(req mcp.CallToolRequest) ToolInput {
-	args := req.GetArguments()
+	rawArgs := req.GetArguments()
 	var input ToolInput
 
-	if flags, ok := args["flags"].(map[string]any); ok {
+	if flags, ok := rawArgs["flags"].(map[string]any); ok {
 		input.Flags = flags
 	}
-	if pa, ok := args["positional_args"].(map[string]any); ok {
-		input.PositionalArgs = pa
-	}
-	if rawArgs, ok := args["args"].([]any); ok {
-		for _, a := range rawArgs {
-			input.Args = append(input.Args, fmt.Sprintf("%v", a))
-		}
+	if pa, ok := rawArgs["args"].(map[string]any); ok {
+		input.Args = pa
 	}
 	return input
 }

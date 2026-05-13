@@ -183,10 +183,7 @@ func reconstructToken(bracketType, name string, variadic bool) string {
 // buildArgsSchema constructs the JSON Schema fragment that describes all
 // positional arguments for a command.
 //
-// When the command has no positional arguments the returned schema is a plain
-// nullable string-array (backward-compatible with the previous behaviour).
-//
-// When positional arguments are detected each one becomes a named property:
+// Each positional argument becomes a named property of an object schema:
 //
 //	{
 //	  "type": "object",
@@ -201,18 +198,9 @@ func reconstructToken(bracketType, name string, variadic bool) string {
 //
 //	"targets": { "type": "array", "items": { "type": "string" }, "description": "..." }
 //
-// The resulting object is intended to replace (not nest inside) the top-level
-// "args" property of the ToolInput JSON Schema.
+// The resulting object replaces the top-level "args" property of the ToolInput
+// JSON Schema. Callers must not call this function with an empty specs slice.
 func buildArgsSchema(specs []ArgSpec) *jsonschema.Schema {
-	if len(specs) == 0 {
-		// No positional arguments — keep a simple nullable array for compatibility.
-		return &jsonschema.Schema{
-			Type:        "array",
-			Description: "Positional command line arguments",
-			Items:       &jsonschema.Schema{Type: "string"},
-		}
-	}
-
 	props := make(map[string]*jsonschema.Schema, len(specs))
 	var required []string
 

@@ -146,7 +146,6 @@ func TestBuildCommandArgs(t *testing.T) {
 			commandName: "root_test",
 			input: ToolInput{
 				Flags: map[string]any{},
-				Args:  []string{},
 			},
 			expectedArgs: []string{"test"},
 		},
@@ -155,7 +154,6 @@ func TestBuildCommandArgs(t *testing.T) {
 			commandName: "root_sub_command",
 			input: ToolInput{
 				Flags: map[string]any{},
-				Args:  []string{},
 			},
 			expectedArgs: []string{"sub", "command"},
 		},
@@ -167,7 +165,6 @@ func TestBuildCommandArgs(t *testing.T) {
 					"verbose": true,
 					"output":  "result.txt",
 				},
-				Args: []string{},
 			},
 			expectedArgs: []string{"test", "--verbose", "--output", "result.txt"},
 		},
@@ -176,7 +173,8 @@ func TestBuildCommandArgs(t *testing.T) {
 			commandName: "root_test",
 			input: ToolInput{
 				Flags: map[string]any{},
-				Args:  []string{"file1.txt", "file2.txt"},
+				// Keys are sorted alphabetically by flattenPositionalArgsMap.
+				Args: map[string]any{"a_file1": "file1.txt", "b_file2": "file2.txt"},
 			},
 			expectedArgs: []string{"test", "file1.txt", "file2.txt"},
 		},
@@ -189,7 +187,8 @@ func TestBuildCommandArgs(t *testing.T) {
 					"replicas":  3,
 					"wait":      true,
 				},
-				Args: []string{"my-app", "v1.2.3"},
+				// Keys sorted: "app" < "version"
+				Args: map[string]any{"app": "my-app", "version": "v1.2.3"},
 			},
 			expectedArgs: []string{"deploy", "--namespace", "production", "--replicas", "3", "--wait", "my-app", "v1.2.3"},
 		},
@@ -201,7 +200,6 @@ func TestBuildCommandArgs(t *testing.T) {
 					"output": "json",
 					"label":  []any{"env=prod", "team=backend"},
 				},
-				Args: []string{},
 			},
 			expectedArgs: []string{"cluster", "node", "list", "--output", "json", "--label", "env=prod", "--label", "team=backend"},
 		},
@@ -216,7 +214,7 @@ func TestBuildCommandArgs(t *testing.T) {
 					},
 					"wait": true,
 				},
-				Args: []string{"my-app"},
+				Args: map[string]any{"app": "my-app"},
 			},
 			expectedArgs: []string{"deploy", "--labels", "env=production", "--labels", "version=v1.2.3", "--wait", "my-app"},
 		},
@@ -225,7 +223,12 @@ func TestBuildCommandArgs(t *testing.T) {
 			commandName: "root_exec",
 			input: ToolInput{
 				Flags: map[string]any{},
-				Args:  []string{"argument with spaces", "another quoted arg", "normal"},
+				// Keys sorted: "a" < "b" < "c"
+				Args: map[string]any{
+					"a": "argument with spaces",
+					"b": "another quoted arg",
+					"c": "normal",
+				},
 			},
 			expectedArgs: []string{"exec", "argument with spaces", "another quoted arg", "normal"},
 		},

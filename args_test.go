@@ -107,13 +107,6 @@ func TestParseArgSpecs_FlagsAndArgsMixed(t *testing.T) {
 // buildArgsSchema tests
 // ──────────────────────────────────────────────────────────────────────────────
 
-func TestBuildArgsSchema_NoSpecs(t *testing.T) {
-	s := buildArgsSchema(nil)
-	assert.Equal(t, "array", s.Type)
-	assert.NotNil(t, s.Items)
-	assert.Equal(t, "string", s.Items.Type)
-}
-
 func TestBuildArgsSchema_RequiredAndOptional(t *testing.T) {
 	specs := []ArgSpec{
 		{Name: "module", Required: true, Variadic: false, Index: 0},

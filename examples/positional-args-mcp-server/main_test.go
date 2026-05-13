@@ -4,7 +4,7 @@ package main
 // reflected in the generated MCP Tool JSON Schema.
 //
 // For each pattern we check:
-//   - The "positional_args" object property is present (or "args" for variadic-only).
+//   - The "args" object property is present when the command has positional args.
 //   - Each argument token maps to a correctly-typed property.
 //   - Required tokens appear in the "required" list; optional ones do not.
 //   - Variadic tokens map to an array-of-string property.
@@ -37,13 +37,13 @@ func TestOncallSchema(t *testing.T) {
 
 	schema := findToolInputSchema(t, srv, "oncall")
 
-	// "positional_args" must be present; "args" must not.
-	require.Contains(t, schema.Properties, "positional_args",
-		"oncall: expected positional_args object in schema")
-	assert.NotContains(t, schema.Properties, "args",
-		"oncall: args array should be absent when positional_args is used")
+	// "args" object must be present; "positional_args" must not.
+	require.Contains(t, schema.Properties, "args",
+		"oncall: expected args object in schema")
+	assert.NotContains(t, schema.Properties, "positional_args",
+		"oncall: positional_args key must not exist")
 
-	pos := schema.Properties["positional_args"]
+	pos := schema.Properties["args"]
 	require.Equal(t, "object", pos.Type)
 
 	// <module> — required, string
@@ -78,8 +78,8 @@ func TestCpSchema(t *testing.T) {
 
 	schema := findToolInputSchema(t, srv, "cp")
 
-	require.Contains(t, schema.Properties, "positional_args")
-	pos := schema.Properties["positional_args"]
+	require.Contains(t, schema.Properties, "args")
+	pos := schema.Properties["args"]
 
 	// Both args must be required strings.
 	for _, name := range []string{"src", "dst"} {
@@ -106,9 +106,9 @@ func TestMakeSchema(t *testing.T) {
 
 	schema := findToolInputSchema(t, srv, "make")
 
-	// Variadic arg → positional_args object with an array property.
-	require.Contains(t, schema.Properties, "positional_args")
-	pos := schema.Properties["positional_args"]
+	// Variadic arg → args object with an array property.
+	require.Contains(t, schema.Properties, "args")
+	pos := schema.Properties["args"]
 
 	require.Contains(t, pos.Properties, "targets")
 	targetsSchema := pos.Properties["targets"]
@@ -139,8 +139,8 @@ func TestKubectlGetSchema(t *testing.T) {
 	// Tool name for "kubectl get" with empty prefix → "kubectl_get"
 	schema := findToolInputSchema(t, srv, "kubectl_get")
 
-	require.Contains(t, schema.Properties, "positional_args")
-	pos := schema.Properties["positional_args"]
+	require.Contains(t, schema.Properties, "args")
+	pos := schema.Properties["args"]
 
 	// <resource> required, [name] optional
 	require.Contains(t, pos.Properties, "resource")
@@ -151,7 +151,7 @@ func TestKubectlGetSchema(t *testing.T) {
 	assert.Equal(t, "string", pos.Properties["name"].Type)
 	assert.NotContains(t, pos.Required, "name")
 
-	// Flags should still be present alongside positional_args.
+	// Flags should still be present alongside args.
 	require.Contains(t, schema.Properties, "flags")
 	flagsSchema := schema.Properties["flags"]
 	assert.Contains(t, flagsSchema.Properties, "namespace")
@@ -167,8 +167,8 @@ func TestKubectlLogsSchema(t *testing.T) {
 
 	// "logs <pod> [flags]" — [flags] is ignored by cobrax.
 	schema := findToolInputSchema(t, srv, "kubectl_logs")
-	require.Contains(t, schema.Properties, "positional_args")
-	pos := schema.Properties["positional_args"]
+	require.Contains(t, schema.Properties, "args")
+	pos := schema.Properties["args"]
 
 	require.Contains(t, pos.Properties, "pod")
 	assert.Equal(t, "string", pos.Properties["pod"].Type)
@@ -188,8 +188,8 @@ func TestKubectlExecSchema(t *testing.T) {
 
 	// "exec <pod> <cmd...>" — pod required string, cmd required string array
 	schema := findToolInputSchema(t, srv, "kubectl_exec")
-	require.Contains(t, schema.Properties, "positional_args")
-	pos := schema.Properties["positional_args"]
+	require.Contains(t, schema.Properties, "args")
+	pos := schema.Properties["args"]
 
 	require.Contains(t, pos.Properties, "pod")
 	assert.Equal(t, "string", pos.Properties["pod"].Type)
@@ -203,6 +203,30 @@ func TestKubectlExecSchema(t *testing.T) {
 	assert.Equal(t, "string", cmdSchema.Items.Type)
 	assert.Contains(t, pos.Required, "cmd",
 		"exec: <cmd...> is required")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pattern 5 – chat (no positional args)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestChatSchema(t *testing.T) {
+	root := buildRootCmd()
+	root.AddCommand(cobrax.Command(nil))
+
+	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, root)
+	require.NoError(t, err)
+
+	schema := findToolInputSchema(t, srv, "chat")
+
+	// chat has no positional arg tokens → "args" must be absent.
+	assert.NotContains(t, schema.Properties, "args",
+		"chat: args must be absent when the command has no positional arg tokens")
+	assert.NotContains(t, schema.Properties, "positional_args",
+		"chat: positional_args must never exist")
+
+	// flags must still be present (--test flag).
+	require.Contains(t, schema.Properties, "flags")
+	assert.Contains(t, schema.Properties["flags"].Properties, "test")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -243,10 +267,9 @@ func findToolInputSchema(t *testing.T, srv *cobrax.MCPServer, toolName string) *
 	t.Helper()
 	for _, tool := range srv.Tools() {
 		if tool.Name == toolName {
-			raw, err := json.Marshal(tool.InputSchema)
-			require.NoError(t, err)
+			require.NotEmpty(t, tool.RawInputSchema, "tool %q: RawInputSchema must not be empty", toolName)
 			s := &jsonschema.Schema{}
-			require.NoError(t, json.Unmarshal(raw, s))
+			require.NoError(t, json.Unmarshal(tool.RawInputSchema, s))
 			return s
 		}
 	}

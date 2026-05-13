@@ -133,10 +133,10 @@ func (s Selector) enhanceFlagsSchema(schema *jsonschema.Schema, cmd *cobra.Comma
 //
 // Positional argument handling:
 //   - cmd.Use is parsed for named argument tokens (e.g. <module> [title...]).
-//   - Each token becomes a named property in the "positional_args" object of
-//     the input schema, with its own description, type, and required status.
-//   - When no named tokens are detected the "args" array property is kept as a
-//     plain []string for backward compatibility.
+//   - Each token becomes a named property in the "args" object of the input
+//     schema, with its own description, type, and required status.
+//   - When no named tokens are detected the "args" property is removed entirely
+//     so the LLM is not confused by an inapplicable field.
 func (s Selector) createToolFromCmd(cmd *cobra.Command, toolNamePrefix string) *mcp.Tool {
 	schema := inputSchema.Copy()
 	s.enhanceFlagsSchema(schema.Properties["flags"], cmd)
@@ -169,40 +169,23 @@ func (s Selector) createToolFromCmd(cmd *cobra.Command, toolNamePrefix string) *
 // enhanceArgsSchema updates the input schema's positional-argument properties.
 //
 // When specs is non-empty (the command has named argument tokens in cmd.Use):
-//   - The "positional_args" property is replaced with a structured object schema
-//     whose properties correspond to the individual named arguments.
-//   - The "args" property is removed (it would be redundant and confusing to LLMs).
+//   - The "args" property is replaced with a structured object schema whose
+//     properties correspond to the individual named arguments.
 //
-// When specs is empty:
-//   - The "positional_args" property is removed (not applicable).
-//   - The "args" property is kept as a plain string array with a usage-pattern
-//     description extracted from cmd.Use (backward-compatible behaviour).
-func enhanceArgsSchema(schema *jsonschema.Schema, cmd *cobra.Command, specs []ArgSpec) {
+// When specs is empty (the command has no positional arguments):
+//   - The "args" property is removed entirely so the LLM is not presented with
+//     a field that has no meaning for this command.
+func enhanceArgsSchema(schema *jsonschema.Schema, _ *cobra.Command, specs []ArgSpec) {
 	if schema.Properties == nil {
 		schema.Properties = make(map[string]*jsonschema.Schema)
 	}
 
 	if len(specs) > 0 {
-		// Replace the generic "positional_args" entry with the structured schema.
-		schema.Properties["positional_args"] = buildArgsSchema(specs)
-		// Remove the legacy "args" property — it would confuse the LLM.
-		delete(schema.Properties, "args")
+		// Replace the generic "args" entry with the structured object schema.
+		schema.Properties["args"] = buildArgsSchema(specs)
 	} else {
-		// No named args: remove "positional_args", keep "args" with usage hint.
-		delete(schema.Properties, "positional_args")
-		if argsSchema, ok := schema.Properties["args"]; ok {
-			description := "Positional command line arguments"
-			// Extract usage pattern from cmd.Use for the description.
-			usage := strings.ReplaceAll(cmd.Use, "[flags]", "")
-			usage = strings.TrimSpace(usage)
-			if spaceIdx := strings.IndexByte(usage, ' '); spaceIdx != -1 {
-				argsPattern := strings.TrimSpace(usage[spaceIdx+1:])
-				if argsPattern != "" {
-					description += fmt.Sprintf("\nUsage pattern: %s", argsPattern)
-				}
-			}
-			argsSchema.Description = description
-		}
+		// No positional args: remove the "args" property entirely.
+		delete(schema.Properties, "args")
 	}
 }
 

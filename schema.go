@@ -5,25 +5,18 @@ import "github.com/onexstack/cobrax/internal/schema"
 // ToolInput represents the input structure for command tools.
 // Do not `omitempty` the Flags field, there may be required flags inside.
 //
-// Positional arguments are encoded in two complementary ways:
+// Positional arguments are encoded in Args (map[string]any) when the command
+// has named positional argument tokens parsed from cmd.Use. Each key is the
+// canonical argument name (e.g. "module", "title") and the value is the string
+// (or []string for variadic) supplied by the caller. The MCP JSON Schema
+// exposes these as individually-described named properties so that an LLM
+// knows exactly what to supply for each position.
 //
-//  1. PositionalArgs (map[string]any): the preferred representation when the
-//     command has named positional arguments parsed from cmd.Use. Each key is
-//     the canonical argument name (e.g. "module", "title") and the value is
-//     the string (or []string for variadic) supplied by the caller. The MCP
-//     JSON Schema exposes these as individually-described named properties so
-//     that an LLM knows exactly what to supply for each position.
-//
-//  2. Args ([]string): the legacy flat-array representation. Used as a
-//     fallback when a command has no named argument tokens in cmd.Use, or when
-//     the caller prefers to supply raw positional values directly.
-//
-// Only one of the two fields needs to be populated for any given call; the
-// execution layer checks PositionalArgs first, then falls back to Args.
+// When a command has no positional argument tokens in cmd.Use, the Args field
+// is absent from both the JSON Schema and the decoded input.
 type ToolInput struct {
-	Flags         map[string]any `json:"flags" jsonschema:"Command line flags"`
-	PositionalArgs map[string]any `json:"positional_args,omitempty" jsonschema:"Named positional arguments (preferred when the command defines named arg tokens in its Use string)"`
-	Args          []string       `json:"args,omitempty" jsonschema:"Positional command line arguments (legacy flat list; use positional_args when available)"`
+	Flags map[string]any `json:"flags" jsonschema:"Command line flags"`
+	Args  map[string]any `json:"args,omitempty" jsonschema:"Positional command line arguments"`
 }
 
 // ToolOutput represents the output structure for command tools.

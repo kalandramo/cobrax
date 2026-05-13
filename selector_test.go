@@ -145,9 +145,9 @@ func TestCreateToolFromCmd(t *testing.T) {
 		assert.Equal(t, "object", inputSchema.Type)
 		require.NotNil(t, inputSchema.Properties)
 		assert.Contains(t, inputSchema.Properties, "flags")
-		// cmd.Use = "test [file]" → named arg token → "positional_args" replaces "args"
-		assert.Contains(t, inputSchema.Properties, "positional_args")
-		assert.NotContains(t, inputSchema.Properties, "args")
+		// cmd.Use = "test [file]" → named arg token → "args" object schema
+		assert.Contains(t, inputSchema.Properties, "args")
+		assert.NotContains(t, inputSchema.Properties, "positional_args")
 
 		// Verify flags schema
 		flagsSchema := inputSchema.Properties["flags"]
@@ -228,17 +228,17 @@ func TestCreateToolFromCmd(t *testing.T) {
 
 		// Verify positional args schema.
 		// cmd.Use = "test [file]" → parsed as optional named arg "file"
-		// → schema uses "positional_args" object, "args" is removed.
-		assert.Contains(t, inputSchema.Properties, "positional_args",
-			"Should have positional_args when cmd.Use has named arg tokens")
-		assert.NotContains(t, inputSchema.Properties, "args",
-			"args array should be removed when positional_args object is present")
+		// → schema uses "args" object with named properties.
+		assert.Contains(t, inputSchema.Properties, "args",
+			"Should have args object when cmd.Use has named arg tokens")
+		assert.NotContains(t, inputSchema.Properties, "positional_args",
+			"positional_args key should not exist")
 
-		positionalSchema := inputSchema.Properties["positional_args"]
+		positionalSchema := inputSchema.Properties["args"]
 		assert.Equal(t, "object", positionalSchema.Type)
 		require.NotNil(t, positionalSchema.Properties)
 		assert.Contains(t, positionalSchema.Properties, "file",
-			"positional_args should have a 'file' property matching the [file] token")
+			"args should have a 'file' property matching the [file] token")
 
 		fileArgSchema := positionalSchema.Properties["file"]
 		assert.Equal(t, "string", fileArgSchema.Type)
@@ -291,14 +291,14 @@ func TestCreateToolFromCmd(t *testing.T) {
 		// Verify required flags - none should be required since 'count' was excluded
 		require.Empty(t, flagsSchema.Required, "Should have no required flags")
 
-		// cmd.Use = "test [file]" → positional_args object schema
-		assert.Contains(t, inputSchema.Properties, "positional_args")
-		assert.NotContains(t, inputSchema.Properties, "args")
+		// cmd.Use = "test [file]" → "args" object schema
+		assert.Contains(t, inputSchema.Properties, "args")
+		assert.NotContains(t, inputSchema.Properties, "positional_args")
 	})
 
-	t.Run("No positional args - legacy args array", func(t *testing.T) {
-		// A command with no positional argument tokens in cmd.Use should
-		// retain the legacy "args" array property.
+	t.Run("No positional args - no args property", func(t *testing.T) {
+		// A command with no positional argument tokens in cmd.Use should have
+		// neither an "args" nor a "positional_args" property in its schema.
 		noArgCmd := &cobra.Command{
 			Use:   "noarg",
 			Short: "No positional args",
@@ -306,12 +306,10 @@ func TestCreateToolFromCmd(t *testing.T) {
 		}
 		tool := Selector{}.createToolFromCmd(noArgCmd, "root")
 		schema := parseRawInputSchema(t, tool.RawInputSchema)
-		assert.Contains(t, schema.Properties, "args",
-			"Should keep legacy args when no named arg tokens in cmd.Use")
+		assert.NotContains(t, schema.Properties, "args",
+			"Should not have args property when cmd.Use has no named arg tokens")
 		assert.NotContains(t, schema.Properties, "positional_args",
-			"Should not have positional_args when cmd.Use has no named arg tokens")
-		argsSchema := schema.Properties["args"]
-		assert.True(t, hasSchemaType(argsSchema, "array"), "args should be an array type")
+			"Should not have positional_args property")
 	})
 
 	t.Run("Required positional arg", func(t *testing.T) {
@@ -322,7 +320,7 @@ func TestCreateToolFromCmd(t *testing.T) {
 		}
 		tool := Selector{}.createToolFromCmd(reqArgCmd, "root")
 		schema := parseRawInputSchema(t, tool.RawInputSchema)
-		positional := schema.Properties["positional_args"]
+		positional := schema.Properties["args"]
 		require.NotNil(t, positional)
 		assert.Contains(t, positional.Required, "name",
 			"Required arg <name> should be in Required list")
@@ -336,7 +334,7 @@ func TestCreateToolFromCmd(t *testing.T) {
 		}
 		tool := Selector{}.createToolFromCmd(varArgCmd, "root")
 		schema := parseRawInputSchema(t, tool.RawInputSchema)
-		positional := schema.Properties["positional_args"]
+		positional := schema.Properties["args"]
 		require.NotNil(t, positional)
 		require.Contains(t, positional.Properties, "targets")
 		assert.Equal(t, "array", positional.Properties["targets"].Type,
@@ -356,7 +354,7 @@ func TestCreateToolFromCmd(t *testing.T) {
 		}
 		tool := Selector{}.createToolFromCmd(annotCmd, "root")
 		schema := parseRawInputSchema(t, tool.RawInputSchema)
-		positional := schema.Properties["positional_args"]
+		positional := schema.Properties["args"]
 		require.NotNil(t, positional)
 		require.Contains(t, positional.Properties, "module")
 		require.Contains(t, positional.Properties, "title")

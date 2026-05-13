@@ -76,7 +76,7 @@ type MCPServer struct {
 	selectors []Selector
 	// toolArgSpecs maps tool name → ordered ArgSpec slice for that tool's
 	// positional arguments. This allows the in-process execution path to
-	// reassemble PositionalArgs in the correct CLI order.
+	// reassemble input.Args in the correct CLI order.
 	toolArgSpecs map[string][]ArgSpec
 	// toolPaths maps tool name → the cobra sub-command path segments to pass
 	// to rootCmd (i.e. the command path with the root name stripped). This is
@@ -215,7 +215,6 @@ func (s *MCPServer) registerToolsRecursive(cmd *cobra.Command) {
 	for _, sub := range cmd.Commands() {
 		s.registerToolsRecursive(sub)
 	}
-	fmt.Println("99999999999999999999999999999999999999999999999999999999999999999999999999-0", cmd.Name())
 
 	// Apply built-in safety filters.
 	if s.cmdFilter(cmd) {
@@ -236,7 +235,6 @@ func (s *MCPServer) registerToolsRecursive(cmd *cobra.Command) {
 
 	// Evaluate selectors in order; the first matching selector wins.
 	for i, sel := range s.selectors {
-		fmt.Println("99999999999999999999999999999999999999999999999999999999999999999999999999-1", cmd.Name())
 		if sel.CmdSelector != nil && !sel.CmdSelector(cmd) {
 			continue
 		}
@@ -256,7 +254,6 @@ func (s *MCPServer) registerToolsRecursive(cmd *cobra.Command) {
 
 		// Store the cobra command path segments for this tool.
 		s.toolPaths[tool.Name] = cmdPath
-		fmt.Println("99999999999999999999999999999999999999999999999999999999999999999999999999-2", tool.Name)
 
 		// Capture sel and cmd in a closure for the tool handler.
 		handler := s.makeInProcessHandler(sel, cmd)
@@ -343,7 +340,7 @@ func (s *MCPServer) runInProcess(ctx context.Context, req mcp.CallToolRequest, i
 	name := req.Params.Name
 	slog.Info("in-process MCP tool request", "tool", name)
 
-	// Look up the ArgSpec slice for this tool (may be nil for commands without
+	// Look up the ArgSpec slice for this tool (nil for commands without
 	// named positional argument tokens).
 	specs := s.toolArgSpecs[name]
 
@@ -414,13 +411,9 @@ func buildInProcessArgsFromPath(cmdPath []string, input ToolInput, specs []ArgSp
 	// Append flag arguments.
 	parts = append(parts, buildFlagArgs(input.Flags)...)
 
-	// Append positional arguments in the correct order.
-	if len(specs) > 0 && len(input.PositionalArgs) > 0 {
-		// Use spec-ordered collection for named positional args.
-		parts = append(parts, collectPositionalArgs(specs, input.PositionalArgs)...)
-	} else {
-		// Fall back to the legacy flat args slice.
-		parts = append(parts, input.Args...)
+	// Append positional arguments in the correct spec-defined order.
+	if len(specs) > 0 && len(input.Args) > 0 {
+		parts = append(parts, collectPositionalArgs(specs, input.Args)...)
 	}
 
 	return parts

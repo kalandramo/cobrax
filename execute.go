@@ -89,11 +89,9 @@ func splitToolName(name string) []string {
 // positional arguments so the resulting slice can be passed directly to
 // exec.Command when re-invoking the binary as a subprocess.
 //
-// Positional argument resolution order:
-//  1. PositionalArgs (map[string]any) — populated when the command schema uses
-//     named argument tokens. The map is reassembled into an ordered []string by
-//     resolvePositionalArgs using the ArgSpec order stored alongside the tool.
-//  2. Args ([]string) — legacy flat list, used as a fallback.
+// Positional arguments are taken from input.Args (map[string]any), which is
+// populated when the command schema uses named argument tokens. The map is
+// flattened into an ordered []string by resolvePositionalArgs.
 func buildCommandArgs(name string, input ToolInput) []string {
 	// Decode "root_sub_command" -> ["sub", "command"] by dropping the root prefix.
 	args := splitToolName(name)[1:]
@@ -102,37 +100,24 @@ func buildCommandArgs(name string, input ToolInput) []string {
 	flagArgs := buildFlagArgs(input.Flags)
 	args = append(args, flagArgs...)
 
-	// Add positional arguments — prefer named map, fall back to flat slice.
+	// Add positional arguments.
 	positional := resolvePositionalArgs(input)
 	return append(args, positional...)
 }
 
 // resolvePositionalArgs extracts an ordered positional-argument list from a
-// ToolInput. It prefers the structured PositionalArgs map when present;
-// otherwise it returns the legacy Args slice directly.
+// ToolInput by flattening the Args map into a string slice.
 //
-// Note: when PositionalArgs is used, the caller is responsible for supplying
-// the correct ordering by populating PositionalArgs via collectPositionalArgs
-// (for in-process execution) or by preserving insertion order from the schema
-// (for subprocess execution, where ordering information is not available at
-// this layer). For subprocess execution, the LLM populates PositionalArgs
-// whose keys match the ArgSpec names, but the order is lost in a plain
-// map[string]any. To preserve order we simply iterate in the order the values
-// were received — which mirrors the schema property order. When the map has
-// only a few keys this is deterministic enough for most CLI tools.
-//
-// For a fully deterministic order, use the in-process model where
-// buildInProcessArgs has access to the ArgSpec slice.
+// Note: map iteration order in Go is non-deterministic; for the subprocess
+// model the spec order is not available at this layer, so values are collected
+// in sorted-key order as a best-effort fallback. Callers that need a
+// guaranteed order should use the in-process model where buildInProcessArgs
+// has access to the ArgSpec slice.
 func resolvePositionalArgs(input ToolInput) []string {
-	if len(input.PositionalArgs) > 0 {
-		// Flatten the named map into a slice. Map iteration order in Go is
-		// non-deterministic; however, for the subprocess model we cannot
-		// know the spec order here. We collect values in sorted-key order
-		// as a best-effort fallback. Callers that need a guaranteed order
-		// should use the in-process model.
-		return flattenPositionalArgsMap(input.PositionalArgs)
+	if len(input.Args) > 0 {
+		return flattenPositionalArgsMap(input.Args)
 	}
-	return input.Args
+	return nil
 }
 
 // flattenPositionalArgsMap converts a positional-args map into an ordered
