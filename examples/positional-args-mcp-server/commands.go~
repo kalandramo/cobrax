@@ -1,3 +1,30 @@
+// Package main demonstrates how to declare Cobra positional arguments so that
+// cobrax can parse them into a well-structured MCP Tool JSON Schema, enabling
+// LLMs to understand and supply each argument by name.
+//
+// # Positional Argument Syntax Rules
+//
+// cobrax reads the cmd.Use field and turns every bracket-enclosed token into a
+// named property inside the "positional_args" object of the MCP JSON Schema.
+// The token syntax follows the same convention used by kubectl, helm, and other
+// popular CLIs:
+//
+//	<name>     – required, single value   → JSON Schema: string,  required
+//	[name]     – optional, single value   → JSON Schema: string,  not required
+//	<name...>  – required, variadic       → JSON Schema: string[], required
+//	[name...]  – optional, variadic       → JSON Schema: string[], not required
+//	[flags]    – cobra's flag sentinel    → silently ignored
+//
+// Use the cobrax.AnnotationArgPrefix+"<index>" annotation to supply a precise,
+// human-readable description for each argument. Without annotations cobrax
+// synthesises a generic description from the token shape.
+//
+// # Four Patterns Demonstrated
+//
+//  1. oncall  <module> [title]       – required + optional single-value args
+//  2. cp      <src> <dst>            – two required single-value args
+//  3. make    [targets...]           – optional variadic args
+//  4. kubectl get <resource> [name]  – mixed required + optional in a sub-tree
 package main
 
 import (
@@ -14,18 +41,18 @@ import (
 //
 // Resulting positional_args JSON Schema:
 //
-//    {
-//      "type": "object",
-//      "required": ["module"],
-//      "properties": {
-//        "module": { "type": "string", "description": "值班模块 ..." },
-//        "title":  { "type": "string", "description": "工单标题 ..." }
-//      }
-//    }
+//	{
+//	  "type": "object",
+//	  "required": ["module"],
+//	  "properties": {
+//	    "module": { "type": "string", "description": "值班模块 ..." },
+//	    "title":  { "type": "string", "description": "工单标题 ..." }
+//	  }
+//	}
 //
 // LLM input example:
 //
-//    { "positional_args": { "module": "bke", "title": "节点 NotReady" } }
+//	{ "positional_args": { "module": "bke", "title": "节点 NotReady" } }
 // ─────────────────────────────────────────────────────────────────────────────
 
 func newOncallCmd() *cobra.Command {
@@ -89,18 +116,18 @@ func newOncallCmd() *cobra.Command {
 //
 // Resulting positional_args JSON Schema:
 //
-//    {
-//      "type": "object",
-//      "required": ["src", "dst"],
-//      "properties": {
-//        "src": { "type": "string", "description": "源文件路径 ..." },
-//        "dst": { "type": "string", "description": "目标路径 ..."  }
-//      }
-//    }
+//	{
+//	  "type": "object",
+//	  "required": ["src", "dst"],
+//	  "properties": {
+//	    "src": { "type": "string", "description": "源文件路径 ..." },
+//	    "dst": { "type": "string", "description": "目标路径 ..."  }
+//	  }
+//	}
 //
 // LLM input example:
 //
-//    { "positional_args": { "src": "/tmp/dump.sql", "dst": "s3://bucket/backup/" } }
+//	{ "positional_args": { "src": "/tmp/dump.sql", "dst": "s3://bucket/backup/" } }
 // ─────────────────────────────────────────────────────────────────────────────
 
 func newCpCmd() *cobra.Command {
@@ -147,24 +174,24 @@ func newCpCmd() *cobra.Command {
 //
 // Resulting positional_args JSON Schema:
 //
-//    {
-//      "type": "object",
-//      "properties": {
-//        "targets": {
-//          "type": "array",
-//          "items": { "type": "string" },
-//          "description": "要执行的 Make 目标列表 ..."
-//        }
-//      }
-//    }
+//	{
+//	  "type": "object",
+//	  "properties": {
+//	    "targets": {
+//	      "type": "array",
+//	      "items": { "type": "string" },
+//	      "description": "要执行的 Make 目标列表 ..."
+//	    }
+//	  }
+//	}
 //
 // LLM input example (multiple targets):
 //
-//    { "positional_args": { "targets": ["build", "test", "lint"] } }
+//	{ "positional_args": { "targets": ["build", "test", "lint"] } }
 //
 // LLM input example (no targets – run default):
 //
-//    { "positional_args": {} }
+//	{ "positional_args": {} }
 // ─────────────────────────────────────────────────────────────────────────────
 
 func newMakeCmd() *cobra.Command {
@@ -376,77 +403,3 @@ func newKubectlExecCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&container, "container", "c", "", "指定容器名称（Pod 内有多个容器时使用）")
 	return cmd
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// New Pattern – chat command with no args and a --test flag
-//
-// cmd.Use:  "chat"
-//
-// Resulting positional_args JSON Schema:
-//
-//    {
-//      "type": "object",
-//      "properties": {}
-//    }
-//
-// LLM input example:
-//
-//    { "positional_args": {} }
-// ─────────────────────────────────────────────────────────────────────────────
-
-func newChatCmd() *cobra.Command {
-	var isTest bool // 用于存储 --test flag 的值
-
-	cmd := &cobra.Command{
-		Use:   "chat",
-		Short: "启动聊天会话",
-		Long: `此命令用于启动一个交互式聊天会话。
-
-  它没有任何位置参数。
-
-  使用 --test flag 可以启用测试模式。`,
-		Example: `  # 启动普通聊天会话
-  yourcli chat
-
-  # 启动测试模式的聊天会话
-  yourcli chat --test`,
-
-		Args: cobra.NoArgs, // chat 命令没有任何位置参数
-
-		Annotations: map[string]string{
-			// cobrax.AnnotationArgPrefix + "0": "没有位置参数", // NoArgs 时不需要此注解
-		},
-
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if isTest {
-				fmt.Fprintf(cmd.OutOrStdout(), "Chat session started in TEST mode.\n")
-			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "Chat session started in normal mode.\n")
-			}
-			// 这里可以添加实际的聊天会话逻辑
-			return nil
-		},
-	}
-
-	// 添加 --test flag
-	cmd.Flags().BoolVar(&isTest, "test", false, "启用测试模式")
-	return cmd
-}
-
-// root 命令
-var rootCmd = &cobra.Command{
-	Use:   "yourcli",
-	Short: "一个示例命令行工具",
-	Long: `这是一个使用 Cobra 和 Cobrax 构建的示例命令行工具，
-演示了不同类型的位置参数和 flag 的配置。`,
-}
-
-/*
-func init() {
-	rootCmd.AddCommand(newOncallCmd())
-	rootCmd.AddCommand(newCpCmd())
-	rootCmd.AddCommand(newMakeCmd())
-	rootCmd.AddCommand(newKubectlCmd())
-	rootCmd.AddCommand(newChatCmd()) // 添加新的 chat 命令
-}
-*/

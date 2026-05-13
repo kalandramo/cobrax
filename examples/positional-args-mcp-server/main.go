@@ -60,5 +60,7 @@ func buildRootCmd() *cobra.Command {
 	// Pattern 4: sub-command tree
 	root.AddCommand(newKubectlCmd())
 
+	root.AddCommand(newChatCmd())
+
 	return root
 }

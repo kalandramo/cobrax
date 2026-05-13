@@ -75,8 +75,12 @@ func (s Selector) enhanceFlagsSchema(schema *jsonschema.Schema, cmd *cobra.Comma
 		schema.Properties = make(map[string]*jsonschema.Schema)
 	}
 
-	// basic filters
+	// basic filters: skip hidden and deprecated flags, but allow "help" through
+	// separately so it can be explicitly added to the schema below.
 	filter := func(flag *pflag.Flag) bool {
+		if flag.Name == "help" {
+			return true // handled explicitly below
+		}
 		return flag.Hidden || flag.Deprecated != ""
 	}
 
@@ -110,6 +114,14 @@ func (s Selector) enhanceFlagsSchema(schema *jsonschema.Schema, cmd *cobra.Comma
 
 		flags.AddFlagToSchema(schema, flag)
 	})
+
+	// Explicitly add the help flag (-h/--help) so that MCP clients can request
+	// help output for any command. The flag is normally hidden by cobra but is
+	// useful to expose in the MCP schema so LLMs can discover command usage.
+	schema.Properties["help"] = &jsonschema.Schema{
+		Type:        "boolean",
+		Description: "Display help information for this command (-h/--help)",
+	}
 
 	// Set AdditionalProperties to false
 	// See https://github.com/google/jsonschema-go/issues/13
