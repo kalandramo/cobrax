@@ -134,6 +134,20 @@ func TestBuildFlagArgs(t *testing.T) {
 	}
 }
 
+// makeFlatInput is a helper to build a ToolInput from a flat map, flag set and
+// ordered arg name list — mirrors what decodeToolInput produces at runtime.
+func makeFlatInput(flat map[string]any, flagNames []string, argNames []string) ToolInput {
+	fn := make(map[string]struct{}, len(flagNames))
+	for _, n := range flagNames {
+		fn[n] = struct{}{}
+	}
+	return ToolInput{
+		FlatInput: flat,
+		FlagNames: fn,
+		ArgNames:  argNames,
+	}
+}
+
 func TestBuildCommandArgs(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -144,92 +158,94 @@ func TestBuildCommandArgs(t *testing.T) {
 		{
 			name:        "Simple command",
 			commandName: "root_test",
-			input: ToolInput{
-				Flags: map[string]any{},
-			},
+			input:       makeFlatInput(map[string]any{}, nil, nil),
 			expectedArgs: []string{"test"},
 		},
 		{
 			name:        "Nested command",
 			commandName: "root_sub_command",
-			input: ToolInput{
-				Flags: map[string]any{},
-			},
+			input:       makeFlatInput(map[string]any{}, nil, nil),
 			expectedArgs: []string{"sub", "command"},
 		},
 		{
 			name:        "Command with flags",
 			commandName: "root_test",
-			input: ToolInput{
-				Flags: map[string]any{
-					"verbose": true,
-					"output":  "result.txt",
-				},
-			},
+			input: makeFlatInput(
+				map[string]any{"verbose": true, "output": "result.txt"},
+				[]string{"verbose", "output"},
+				nil,
+			),
 			expectedArgs: []string{"test", "--verbose", "--output", "result.txt"},
 		},
 		{
 			name:        "Command with arguments",
 			commandName: "root_test",
-			input: ToolInput{
-				Flags: map[string]any{},
-				// Keys are sorted alphabetically by flattenPositionalArgsMap.
-				Args: map[string]any{"a_file1": "file1.txt", "b_file2": "file2.txt"},
-			},
+			// ArgNames determines order: a_file1 then b_file2
+			input: makeFlatInput(
+				map[string]any{"a_file1": "file1.txt", "b_file2": "file2.txt"},
+				nil,
+				[]string{"a_file1", "b_file2"},
+			),
 			expectedArgs: []string{"test", "file1.txt", "file2.txt"},
 		},
 		{
 			name:        "Command with flags and arguments",
 			commandName: "root_deploy",
-			input: ToolInput{
-				Flags: map[string]any{
+			input: makeFlatInput(
+				map[string]any{
 					"namespace": "production",
 					"replicas":  3,
 					"wait":      true,
+					"app":       "my-app",
+					"version":   "v1.2.3",
 				},
-				// Keys sorted: "app" < "version"
-				Args: map[string]any{"app": "my-app", "version": "v1.2.3"},
-			},
+				[]string{"namespace", "replicas", "wait"},
+				[]string{"app", "version"},
+			),
 			expectedArgs: []string{"deploy", "--namespace", "production", "--replicas", "3", "--wait", "my-app", "v1.2.3"},
 		},
 		{
 			name:        "Complex nested command",
 			commandName: "root_cluster_node_list",
-			input: ToolInput{
-				Flags: map[string]any{
+			input: makeFlatInput(
+				map[string]any{
 					"output": "json",
 					"label":  []any{"env=prod", "team=backend"},
 				},
-			},
+				[]string{"output", "label"},
+				nil,
+			),
 			expectedArgs: []string{"cluster", "node", "list", "--output", "json", "--label", "env=prod", "--label", "team=backend"},
 		},
 		{
 			name:        "Command with map flags",
 			commandName: "root_deploy",
-			input: ToolInput{
-				Flags: map[string]any{
+			input: makeFlatInput(
+				map[string]any{
 					"labels": map[string]any{
 						"env":     "production",
 						"version": "v1.2.3",
 					},
 					"wait": true,
+					"app":  "my-app",
 				},
-				Args: map[string]any{"app": "my-app"},
-			},
+				[]string{"labels", "wait"},
+				[]string{"app"},
+			),
 			expectedArgs: []string{"deploy", "--labels", "env=production", "--labels", "version=v1.2.3", "--wait", "my-app"},
 		},
 		{
 			name:        "Command with quoted arguments",
 			commandName: "root_exec",
-			input: ToolInput{
-				Flags: map[string]any{},
-				// Keys sorted: "a" < "b" < "c"
-				Args: map[string]any{
+			input: makeFlatInput(
+				map[string]any{
 					"a": "argument with spaces",
 					"b": "another quoted arg",
 					"c": "normal",
 				},
-			},
+				nil,
+				[]string{"a", "b", "c"},
+			),
 			expectedArgs: []string{"exec", "argument with spaces", "another quoted arg", "normal"},
 		},
 	}

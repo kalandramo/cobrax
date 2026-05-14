@@ -76,10 +76,10 @@ type MCPServer struct {
 	// selectors holds the set of selector rules used during tool registration.
 	// Defaults to a single catch-all Selector{} when none are configured.
 	selectors []Selector
-	// toolArgSpecs maps tool name → ordered ArgSpec slice for that tool's
-	// positional arguments. This allows the in-process execution path to
-	// reassemble input.Args in the correct CLI order.
-	toolArgSpecs map[string][]ArgSpec
+	// toolMetas maps tool name → per-tool metadata (flag names + arg specs)
+	// computed at registration time.  Used during in-process execution to split
+	// the flat MCP input back into flags and positional arguments.
+	toolMetas map[string]toolMeta
 	// toolPaths maps tool name → the cobra sub-command path segments to pass
 	// to rootCmd (i.e. the command path with the root name stripped). This is
 	// stored at registration time so that runInProcess never needs to reverse-
@@ -137,12 +137,12 @@ func NewMCPServer(opts MCPOptions, rootCommand *cobra.Command, serverOpts ...Ser
 	mcpSrv := mcpserver.NewMCPServer(name, version)
 
 	srv := &MCPServer{
-		opts:         opts,
-		server:       mcpSrv,
-		rootCmd:      rootCommand,
-		selectors:    []Selector{{}}, // default catch-all selector
-		toolArgSpecs: make(map[string][]ArgSpec),
-		toolPaths:    make(map[string][]string),
+		opts:      opts,
+		server:    mcpSrv,
+		rootCmd:   rootCommand,
+		selectors: []Selector{{}}, // default catch-all selector
+		toolMetas: make(map[string]toolMeta),
+		toolPaths: make(map[string][]string),
 	}
 
 	for _, opt := range serverOpts {
@@ -246,26 +246,22 @@ func (s *MCPServer) registerToolsRecursive(cmd *cobra.Command) {
 			continue
 		}
 
-		// Parse the positional argument specs for this command so they can be
-		// stored alongside the tool and used during in-process execution.
-		specs := parseArgSpecs(cmd)
-
-		// Create the MCP tool definition (schema, name, description).
-		tool := sel.createToolFromCmd(cmd, toolNamePrefix)
+		// Create the MCP tool definition (flat schema, name, description) and
+		// the per-tool metadata (flag names + arg specs).
+		tool, meta := sel.createToolFromCmd(cmd, toolNamePrefix)
 		slog.Debug("registered in-process tool", "tool_name", tool.Name, "selector_index", i)
 
-		// Store the ArgSpec slice keyed by tool name for use at call time.
-		if len(specs) > 0 {
-			s.toolArgSpecs[tool.Name] = specs
-		}
+		// Store the metadata keyed by tool name for use at call time.
+		s.toolMetas[tool.Name] = meta
 
 		// Store the cobra command path segments for this tool.
 		s.toolPaths[tool.Name] = cmdPath
 
-		// Capture sel and cmd in a closure for the tool handler.
+		// Capture sel and meta in a closure for the tool handler.
 		handler := s.makeInProcessHandler(sel, cmd)
+		toolMeta := meta
 		s.server.AddTool(*tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			input := decodeToolInput(req)
+			input := decodeToolInput(req, toolMeta)
 			result, output, err := handler(ctx, req, input)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
@@ -347,36 +343,14 @@ func (s *MCPServer) runInProcess(ctx context.Context, req mcp.CallToolRequest, i
 	name := req.Params.Name
 	slog.Info("in-process MCP tool request", "tool", name)
 
-	// Look up the ArgSpec slice for this tool (nil for commands without
-	// named positional argument tokens).
-	specs := s.toolArgSpecs[name]
-
 	// Retrieve the pre-computed cobra sub-command path for this tool.
 	// This avoids having to reverse-engineer the path from the tool name,
 	// which breaks when rootCmd.Name() contains characters that are illegal
 	// in MCP tool names (e.g. "/").
 	cmdPath := s.toolPaths[name]
 
-	// Normalise input.Args: some LLMs pass positional arguments as a bare
-	// scalar string (e.g. {"args": "1"}) instead of the structured object the
-	// schema describes (e.g. {"args": {"level": "1"}}). When that happens,
-	// decodeToolInput's map type-assertion fails and input.Args ends up nil,
-	// causing the positional argument to be silently dropped.
-	//
-	// Recover by re-reading the raw "args" value from the request. When it is
-	// a non-nil, non-map value and we have at least one ArgSpec, wrap it in a
-	// single-key map using the first spec's name so that collectPositionalArgs
-	// can pick it up correctly.
-	if input.Args == nil && len(specs) > 0 {
-		if rawVal := req.GetArguments()["args"]; rawVal != nil {
-			if _, isMap := rawVal.(map[string]any); !isMap {
-				input.Args = map[string]any{specs[0].Name: rawVal}
-			}
-		}
-	}
-
-	// Build CLI args from the stored command path and the tool input.
-	args := buildInProcessArgsFromPath(cmdPath, input, specs)
+	// Build CLI args from the stored command path and the flat tool input.
+	args := buildInProcessArgsFromPath(cmdPath, input)
 	slog.Info("in-process command args", "tool", name, "args", args)
 
 	// stdout/stderr buffers are declared outside the lock: they are only
@@ -452,22 +426,20 @@ func cmdSubPath(cmd *cobra.Command) []string {
 }
 
 // buildInProcessArgsFromPath constructs the cobra argument slice from the
-// pre-computed command sub-path, the tool input, and the ordered ArgSpec slice.
+// pre-computed command sub-path and the flat tool input.
 //
 // cmdPath contains the cobra sub-command segments (root already stripped), e.g.
-// ["sre", "open"]. Flags and positional arguments are appended after them.
-func buildInProcessArgsFromPath(cmdPath []string, input ToolInput, specs []ArgSpec) []string {
+// ["sre", "open"]. Flags and positional arguments are appended after them by
+// splitting the flat ToolInput using the FlagNames and ArgNames metadata.
+func buildInProcessArgsFromPath(cmdPath []string, input ToolInput) []string {
 	// Start with a copy of the command path segments.
 	parts := make([]string, len(cmdPath))
 	copy(parts, cmdPath)
 
-	// Append flag arguments.
-	parts = append(parts, buildFlagArgs(input.Flags)...)
-
-	// Append positional arguments in the correct spec-defined order.
-	if len(specs) > 0 && len(input.Args) > 0 {
-		parts = append(parts, collectPositionalArgs(specs, input.Args)...)
-	}
+	// Split the flat input into flag args and positional args, then append.
+	flagMap, posArgs := splitFlatInput(input)
+	parts = append(parts, buildFlagArgs(flagMap)...)
+	parts = append(parts, posArgs...)
 
 	return parts
 }

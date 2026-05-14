@@ -189,7 +189,7 @@ func TestCreateToolFromCmd_Annotations(t *testing.T) {
 		root := &cobra.Command{Use: "app"}
 		root.AddCommand(cmd)
 
-		tool := Selector{}.createToolFromCmd(cmd, "app")
+		tool, _ := Selector{}.createToolFromCmd(cmd, "app")
 		assert.Equal(t, "Delete Resource", tool.Annotations.Title)
 		assert.Equal(t, boolPtr(true), tool.Annotations.DestructiveHint)
 		assert.Equal(t, boolPtr(false), tool.Annotations.OpenWorldHint)
@@ -204,7 +204,7 @@ func TestCreateToolFromCmd_Annotations(t *testing.T) {
 		root := &cobra.Command{Use: "app"}
 		root.AddCommand(cmd)
 
-		tool := Selector{}.createToolFromCmd(cmd, "app")
+		tool, _ := Selector{}.createToolFromCmd(cmd, "app")
 		// In mark3labs/mcp-go, Annotations is a value type (not pointer),
 		// so a tool with no annotations has the zero value.
 		assert.Empty(t, tool.Annotations.Title)

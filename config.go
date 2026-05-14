@@ -164,16 +164,17 @@ func (c *Config) registerToolsRecursive(cmd *cobra.Command) {
 			continue
 		}
 
-		// create tool from cmd
-		tool := s.createToolFromCmd(cmd, c.toolNamePrefix)
+		// create tool from cmd — returns flat schema and per-tool metadata
+		tool, meta := s.createToolFromCmd(cmd, c.toolNamePrefix)
 		slog.Debug("created tool", "tool_name", tool.Name, "selector_index", i)
 
-		// capture sel for closure
+		// capture sel and meta for closure
 		sel := s
+		toolMeta := meta
 		// register tool with server using mark3labs/mcp-go API
 		c.server.AddTool(*tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			// Decode the structured ToolInput from the flat arguments map.
-			input := decodeToolInput(req)
+			// Decode the flat ToolInput from the arguments map.
+			input := decodeToolInput(req, toolMeta)
 			_, output, err := sel.execute(ctx, req, input)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
@@ -205,19 +206,26 @@ func (c *Config) cmdFilter(cmd *cobra.Command) bool {
 }
 
 // decodeToolInput extracts a ToolInput from a mark3labs CallToolRequest.
-// The MCP client sends the arguments as a flat map with "flags" and "args"
-// keys matching the ToolInput schema.
-func decodeToolInput(req mcp.CallToolRequest) ToolInput {
+// The MCP client sends all parameters as a flat top-level map.  meta carries
+// the flag name set and arg spec slice that were computed at registration time
+// and are required to reconstruct the cobra command arguments at execution time.
+func decodeToolInput(req mcp.CallToolRequest, meta toolMeta) ToolInput {
 	rawArgs := req.GetArguments()
-	var input ToolInput
+	flat := make(map[string]any, len(rawArgs))
+	for k, v := range rawArgs {
+		flat[k] = v
+	}
 
-	if flags, ok := rawArgs["flags"].(map[string]any); ok {
-		input.Flags = flags
+	argNames := make([]string, len(meta.argSpecs))
+	for i, spec := range meta.argSpecs {
+		argNames[i] = spec.Name
 	}
-	if pa, ok := rawArgs["args"].(map[string]any); ok {
-		input.Args = pa
+
+	return ToolInput{
+		FlatInput: flat,
+		FlagNames: meta.flagNames,
+		ArgNames:  argNames,
 	}
-	return input
 }
 
 // toolOutputToResult converts a ToolOutput into a *mcp.CallToolResult.

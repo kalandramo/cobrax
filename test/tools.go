@@ -114,21 +114,15 @@ func ToolsForCommand(t *testing.T, cmd *cobra.Command, commandName string, expec
 					t.Errorf("Tool %q: expected schema type 'object', got %q", tool.Name, schema.Type)
 				}
 
-				// Validate "flags" property if present
-				if prop, ok := schema.Properties["flags"]; ok {
-					if prop.Type != "object" {
-						t.Errorf("Tool %q: expected 'flags' property type 'object', got %q", tool.Name, prop.Type)
-					}
+				// In the flat schema format, "flags" and "args" are no longer
+				// nested sub-objects — all parameters appear as direct top-level
+				// properties of the schema object.  Verify that neither legacy
+				// wrapper key is present.
+				if _, ok := schema.Properties["flags"]; ok {
+					t.Errorf("Tool %q: flat schema must not contain a nested 'flags' property", tool.Name)
 				}
-
-				// Validate "args" property if present
-				if prop, ok := schema.Properties["args"]; ok {
-					isArgArray := prop.Type == "array" || slices.Contains(prop.Types, "array")
-					hasStringItems := prop.Items != nil && (prop.Items.Type == "string" || slices.Contains(prop.Items.Types, "string"))
-					if !isArgArray || !hasStringItems {
-						t.Errorf("Tool %q: expected 'args' property type 'array' with string items, got Type=%q, Types=%v, Items=%+v",
-							tool.Name, prop.Type, prop.Types, prop.Items)
-					}
+				if _, ok := schema.Properties["args"]; ok {
+					t.Errorf("Tool %q: flat schema must not contain a nested 'args' property", tool.Name)
 				}
 			}
 		}

@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -81,7 +80,21 @@ func execute(ctx context.Context, request mcp.CallToolRequest, input ToolInput) 
 // underscore-delimited segments: ["myapp", "sub", "command"].
 // It is the inverse of the encoding performed by toolName in selector.go.
 func splitToolName(name string) []string {
-	return strings.Split(name, "_")
+	return splitOn(name, '_')
+}
+
+// splitOn splits s by the given separator rune.
+func splitOn(s string, sep rune) []string {
+	var parts []string
+	start := 0
+	for i, r := range s {
+		if r == sep {
+			parts = append(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
 }
 
 // buildCommandArgs constructs CLI arguments from the MCP request.
@@ -89,81 +102,60 @@ func splitToolName(name string) []string {
 // positional arguments so the resulting slice can be passed directly to
 // exec.Command when re-invoking the binary as a subprocess.
 //
-// Positional arguments are taken from input.Args (map[string]any), which is
-// populated when the command schema uses named argument tokens. The map is
-// flattened into an ordered []string by resolvePositionalArgs.
+// The flat ToolInput is split into flags (using FlagNames) and positional
+// arguments (using ArgNames, which preserves cmd.Use ordering).
 func buildCommandArgs(name string, input ToolInput) []string {
 	// Decode "root_sub_command" -> ["sub", "command"] by dropping the root prefix.
 	args := splitToolName(name)[1:]
 
-	// Add flags
-	flagArgs := buildFlagArgs(input.Flags)
-	args = append(args, flagArgs...)
+	// Split flat input into flags and positional args.
+	flagMap, posArgs := splitFlatInput(input)
 
-	// Add positional arguments.
-	positional := resolvePositionalArgs(input)
-	return append(args, positional...)
+	// Add flags.
+	args = append(args, buildFlagArgs(flagMap)...)
+
+	// Add positional arguments in spec order.
+	return append(args, posArgs...)
 }
 
-// resolvePositionalArgs extracts an ordered positional-argument list from a
-// ToolInput by flattening the Args map into a string slice.
+// splitFlatInput separates a flat ToolInput into a flags map and an ordered
+// positional-argument slice.
 //
-// Note: map iteration order in Go is non-deterministic; for the subprocess
-// model the spec order is not available at this layer, so values are collected
-// in sorted-key order as a best-effort fallback. Callers that need a
-// guaranteed order should use the in-process model where buildInProcessArgs
-// has access to the ArgSpec slice.
-func resolvePositionalArgs(input ToolInput) []string {
-	if len(input.Args) > 0 {
-		return flattenPositionalArgsMap(input.Args)
-	}
-	return nil
-}
+// Flags are identified by FlagNames; remaining entries in FlatInput that match
+// ArgNames are collected in ArgNames order as positional arguments.
+func splitFlatInput(input ToolInput) (flagMap map[string]any, posArgs []string) {
+	flagMap = make(map[string]any)
 
-// flattenPositionalArgsMap converts a positional-args map into an ordered
-// string slice. Values that are themselves slices (variadic args) are expanded
-// inline. The iteration is sorted by key name to produce a deterministic result
-// in the subprocess model; the in-process model uses collectPositionalArgs
-// instead, which respects ArgSpec ordering.
-func flattenPositionalArgsMap(m map[string]any) []string {
-	if len(m) == 0 {
-		return nil
-	}
-
-	// Collect keys in sorted order for deterministic output.
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	// Use a simple insertion-sort since the number of args is tiny.
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
+	// Collect flag values.
+	for k, v := range input.FlatInput {
+		if _, isFlag := input.FlagNames[k]; isFlag {
+			flagMap[k] = v
 		}
 	}
 
-	var out []string
-	for _, k := range keys {
-		val := m[k]
-		if val == nil {
+	// Collect positional args in the declared order.
+	for _, name := range input.ArgNames {
+		val, ok := input.FlatInput[name]
+		if !ok || val == nil {
 			continue
 		}
 		switch v := val.(type) {
 		case []any:
 			for _, item := range v {
-				out = append(out, fmt.Sprintf("%v", item))
+				posArgs = append(posArgs, fmt.Sprintf("%v", item))
 			}
 		case []string:
-			out = append(out, v...)
+			posArgs = append(posArgs, v...)
 		default:
-			out = append(out, fmt.Sprintf("%v", val))
+			posArgs = append(posArgs, fmt.Sprintf("%v", val))
 		}
 	}
-	return out
+
+	return flagMap, posArgs
 }
 
-// buildFlagArgs converts the flags map from a [ToolInput] into a slice of CLI
-// flag arguments understood by cobra/pflag.
+// buildFlagArgs converts a flags map into a slice of CLI flag arguments
+// understood by cobra/pflag.
 //
 // Conversion rules:
 //   - bool true  → "--flag"       (false is omitted)

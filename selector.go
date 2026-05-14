@@ -68,11 +68,29 @@ type Selector struct {
 	Middleware MiddlewareFunc
 }
 
-// enhanceFlagsSchema adds detailed flag information to the flags property.
-func (s Selector) enhanceFlagsSchema(schema *jsonschema.Schema, cmd *cobra.Command) {
-	// Ensure properties map exists
-	if schema.Properties == nil {
-		schema.Properties = make(map[string]*jsonschema.Schema)
+// toolMeta holds per-tool metadata computed at registration time and needed
+// during execution to split the flat MCP input back into flags and positional
+// arguments for the underlying cobra command.
+type toolMeta struct {
+	// flagNames is the set of flag property names included in the tool schema.
+	flagNames map[string]struct{}
+	// argSpecs is the ordered list of positional argument specs.
+	argSpecs []ArgSpec
+}
+
+// buildFlatSchema constructs a flat JSON Schema for a cobra command.
+// All flags and positional arguments appear as direct properties of the top-level
+// object — there are no nested "flags" or "args" sub-objects.
+// The returned toolMeta carries the flag name set and arg spec slice needed at
+// execution time to reconstruct the cobra command arguments from the flat input.
+func (s Selector) buildFlatSchema(cmd *cobra.Command) (*jsonschema.Schema, toolMeta) {
+	schema := &jsonschema.Schema{
+		Type:       "object",
+		Properties: make(map[string]*jsonschema.Schema),
+	}
+
+	meta := toolMeta{
+		flagNames: make(map[string]struct{}),
 	}
 
 	// basic filters: skip hidden and deprecated flags, but allow "help" through
@@ -84,66 +102,80 @@ func (s Selector) enhanceFlagsSchema(schema *jsonschema.Schema, cmd *cobra.Comma
 		return flag.Hidden || flag.Deprecated != ""
 	}
 
-	// Process local flags
+	// Process local flags — add directly to the top-level schema.
 	cmd.LocalFlags().VisitAll(func(flag *pflag.Flag) {
 		if filter(flag) {
 			return
 		}
-
 		if s.LocalFlagSelector != nil && !s.LocalFlagSelector(flag) {
 			return
 		}
-
 		flags.AddFlagToSchema(schema, flag)
+		meta.flagNames[flag.Name] = struct{}{}
 	})
 
-	// Process inherited flags
+	// Process inherited flags — add directly to the top-level schema.
 	cmd.InheritedFlags().VisitAll(func(flag *pflag.Flag) {
-		// Skip if already added as local flag
+		// Skip if already added as local flag.
 		if _, exists := schema.Properties[flag.Name]; exists {
 			return
 		}
-
 		if filter(flag) {
 			return
 		}
-
 		if s.InheritedFlagSelector != nil && !s.InheritedFlagSelector(flag) {
 			return
 		}
-
 		flags.AddFlagToSchema(schema, flag)
+		meta.flagNames[flag.Name] = struct{}{}
 	})
 
-	// Explicitly add the help flag (-h/--help) so that MCP clients can request
-	// help output for any command. The flag is normally hidden by cobra but is
-	// useful to expose in the MCP schema so LLMs can discover command usage.
+	// Explicitly add the help flag (-h/--help).
 	schema.Properties["help"] = &jsonschema.Schema{
 		Type:        "boolean",
 		Description: "Display help information for this command (-h/--help)",
 	}
+	meta.flagNames["help"] = struct{}{}
 
-	// Set AdditionalProperties to false
-	// See https://github.com/google/jsonschema-go/issues/13
+	// Add positional argument properties directly to the top-level schema.
+	specs := parseArgSpecs(cmd)
+	meta.argSpecs = specs
+	for _, spec := range specs {
+		var propSchema *jsonschema.Schema
+		if spec.Variadic {
+			propSchema = &jsonschema.Schema{
+				Type:        "array",
+				Description: spec.Description,
+				Items:       &jsonschema.Schema{Type: "string"},
+			}
+		} else {
+			propSchema = &jsonschema.Schema{
+				Type:        "string",
+				Description: spec.Description,
+			}
+		}
+		schema.Properties[spec.Name] = propSchema
+		if spec.Required {
+			schema.Required = append(schema.Required, spec.Name)
+		}
+	}
+
+	// Disallow unexpected extra fields.
 	schema.AdditionalProperties = &jsonschema.Schema{Not: &jsonschema.Schema{}}
+
+	return schema, meta
 }
 
 // createToolFromCmd creates an MCP tool from a Cobra command.
 // The toolNamePrefix is used to replace the root command name in the tool name.
 //
-// Positional argument handling:
-//   - cmd.Use is parsed for named argument tokens (e.g. <module> [title...]).
-//   - Each token becomes a named property in the "args" object of the input
-//     schema, with its own description, type, and required status.
-//   - When no named tokens are detected the "args" property is removed entirely
-//     so the LLM is not confused by an inapplicable field.
-func (s Selector) createToolFromCmd(cmd *cobra.Command, toolNamePrefix string) *mcp.Tool {
-	schema := inputSchema.Copy()
-	s.enhanceFlagsSchema(schema.Properties["flags"], cmd)
-
-	// Parse positional argument specs from cmd.Use and annotations.
-	specs := parseArgSpecs(cmd)
-	enhanceArgsSchema(schema, cmd, specs)
+// The generated input schema is flat: all flags and positional arguments appear
+// as direct top-level properties with no nested "flags" or "args" sub-objects.
+//
+// The returned toolMeta carries the information needed at execution time to
+// reconstruct the CLI command from the flat MCP input.
+func (s Selector) createToolFromCmd(cmd *cobra.Command, toolNamePrefix string) (*mcp.Tool, toolMeta) {
+	schema, meta := s.buildFlatSchema(cmd)
 
 	// Serialize the jsonschema.Schema to json.RawMessage for use with mark3labs/mcp-go.
 	rawSchema, err := json.Marshal(schema)
@@ -163,30 +195,7 @@ func (s Selector) createToolFromCmd(cmd *cobra.Command, toolNamePrefix string) *
 		tool.Annotations = *ann
 	}
 
-	return tool
-}
-
-// enhanceArgsSchema updates the input schema's positional-argument properties.
-//
-// When specs is non-empty (the command has named argument tokens in cmd.Use):
-//   - The "args" property is replaced with a structured object schema whose
-//     properties correspond to the individual named arguments.
-//
-// When specs is empty (the command has no positional arguments):
-//   - The "args" property is removed entirely so the LLM is not presented with
-//     a field that has no meaning for this command.
-func enhanceArgsSchema(schema *jsonschema.Schema, _ *cobra.Command, specs []ArgSpec) {
-	if schema.Properties == nil {
-		schema.Properties = make(map[string]*jsonschema.Schema)
-	}
-
-	if len(specs) > 0 {
-		// Replace the generic "args" entry with the structured object schema.
-		schema.Properties["args"] = buildArgsSchema(specs)
-	} else {
-		// No positional args: remove the "args" property entirely.
-		delete(schema.Properties, "args")
-	}
+	return tool, meta
 }
 
 // toolName creates a tool name from the command path.

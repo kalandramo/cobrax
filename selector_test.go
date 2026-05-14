@@ -131,8 +131,8 @@ func TestCreateToolFromCmd(t *testing.T) {
 	parent.AddCommand(cmd)
 
 	t.Run("Default Selector", func(t *testing.T) {
-		// Create tool from command with a selector that accepts all flags
-		tool := Selector{}.createToolFromCmd(cmd, "parent")
+		// Create tool from command with a selector that accepts all flags.
+		tool, meta := Selector{}.createToolFromCmd(cmd, "parent")
 
 		// Verify tool properties
 		assert.Equal(t, "parent_test", tool.Name)
@@ -144,107 +144,110 @@ func TestCreateToolFromCmd(t *testing.T) {
 		inputSchema := parseRawInputSchema(t, tool.RawInputSchema)
 		assert.Equal(t, "object", inputSchema.Type)
 		require.NotNil(t, inputSchema.Properties)
-		assert.Contains(t, inputSchema.Properties, "flags")
-		// cmd.Use = "test [file]" → named arg token → "args" object schema
-		assert.Contains(t, inputSchema.Properties, "args")
-		assert.NotContains(t, inputSchema.Properties, "positional_args")
 
-		// Verify flags schema
-		flagsSchema := inputSchema.Properties["flags"]
-		require.NotNil(t, flagsSchema.Properties)
-		assert.Contains(t, flagsSchema.Properties, "output")
-		assert.Contains(t, flagsSchema.Properties, "verbose")
-		assert.Contains(t, flagsSchema.Properties, "include")
-		assert.Contains(t, flagsSchema.Properties, "count")
-		assert.Contains(t, flagsSchema.Properties, "greeting")
-		assert.Contains(t, flagsSchema.Properties, "labels")
-		assert.Contains(t, flagsSchema.Properties, "ports")
-		assert.Contains(t, flagsSchema.Properties, "a_json_obj")
-		assert.Contains(t, flagsSchema.Properties, "a_json_array")
+		// In the flat schema format there are no nested "flags" or "args" wrappers;
+		// all parameters are direct top-level properties.
+		assert.NotContains(t, inputSchema.Properties, "flags",
+			"Flat schema must not have a nested 'flags' property")
+		assert.NotContains(t, inputSchema.Properties, "args",
+			"Flat schema must not have a nested 'args' property")
+
+		// All flag properties should be at the top level.
+		assert.Contains(t, inputSchema.Properties, "output")
+		assert.Contains(t, inputSchema.Properties, "verbose")
+		assert.Contains(t, inputSchema.Properties, "include")
+		assert.Contains(t, inputSchema.Properties, "count")
+		assert.Contains(t, inputSchema.Properties, "greeting")
+		assert.Contains(t, inputSchema.Properties, "labels")
+		assert.Contains(t, inputSchema.Properties, "ports")
+		assert.Contains(t, inputSchema.Properties, "a_json_obj")
+		assert.Contains(t, inputSchema.Properties, "a_json_array")
 
 		// Verify excluded flags
-		assert.NotContains(t, flagsSchema.Properties, "hidden", "Should not include hidden flag")
-		assert.NotContains(t, flagsSchema.Properties, "old", "Should not include deprecated flag")
+		assert.NotContains(t, inputSchema.Properties, "hidden", "Should not include hidden flag")
+		assert.NotContains(t, inputSchema.Properties, "old", "Should not include deprecated flag")
 
-		// Verify flag types
-		assert.Equal(t, "string", flagsSchema.Properties["output"].Type)
-		assert.Equal(t, "boolean", flagsSchema.Properties["verbose"].Type)
-		assert.Equal(t, "array", flagsSchema.Properties["include"].Type)
-		assert.Equal(t, "integer", flagsSchema.Properties["count"].Type)
-		assert.Equal(t, "array", flagsSchema.Properties["greeting"].Type)
-		assert.Equal(t, "object", flagsSchema.Properties["labels"].Type)
-		assert.Equal(t, "object", flagsSchema.Properties["ports"].Type)
-		assert.Equal(t, "object", flagsSchema.Properties["a_json_obj"].Type)
-		assert.True(t, hasSchemaType(flagsSchema.Properties["a_json_array"], "array"), "a_json_array should be an array type")
+		// Verify flag types at the top level.
+		assert.Equal(t, "string", inputSchema.Properties["output"].Type)
+		assert.Equal(t, "boolean", inputSchema.Properties["verbose"].Type)
+		assert.Equal(t, "array", inputSchema.Properties["include"].Type)
+		assert.Equal(t, "integer", inputSchema.Properties["count"].Type)
+		assert.Equal(t, "array", inputSchema.Properties["greeting"].Type)
+		assert.Equal(t, "object", inputSchema.Properties["labels"].Type)
+		assert.Equal(t, "object", inputSchema.Properties["ports"].Type)
+		assert.Equal(t, "object", inputSchema.Properties["a_json_obj"].Type)
+		assert.True(t, hasSchemaType(inputSchema.Properties["a_json_array"], "array"), "a_json_array should be an array type")
 
-		// Verify required flags
-		require.Len(t, flagsSchema.Required, 1, "Should have 1 required flag")
-		assert.Contains(t, flagsSchema.Required, "count", "count flag should be marked as required")
+		// Verify required flags appear at the top-level required list.
+		assert.Contains(t, inputSchema.Required, "count", "count flag should be marked as required")
 
 		// Verify default values
-		assert.NotNil(t, flagsSchema.Properties["verbose"].Default)
-		assert.JSONEq(t, "false", string(flagsSchema.Properties["verbose"].Default))
-		assert.NotNil(t, flagsSchema.Properties["count"].Default)
-		assert.JSONEq(t, "10", string(flagsSchema.Properties["count"].Default))
-		assert.NotNil(t, flagsSchema.Properties["greeting"].Default)
-		assert.JSONEq(t, `["hello","world"]`, string(flagsSchema.Properties["greeting"].Default))
-		assert.JSONEq(t, `{"life":42, "power":9001}`, string(flagsSchema.Properties["ports"].Default))
-		assert.JSONEq(t, `{"hello":"world", "go":"lang"}`, string(flagsSchema.Properties["labels"].Default))
+		assert.NotNil(t, inputSchema.Properties["verbose"].Default)
+		assert.JSONEq(t, "false", string(inputSchema.Properties["verbose"].Default))
+		assert.NotNil(t, inputSchema.Properties["count"].Default)
+		assert.JSONEq(t, "10", string(inputSchema.Properties["count"].Default))
+		assert.NotNil(t, inputSchema.Properties["greeting"].Default)
+		assert.JSONEq(t, `["hello","world"]`, string(inputSchema.Properties["greeting"].Default))
+		assert.JSONEq(t, `{"life":42, "power":9001}`, string(inputSchema.Properties["ports"].Default))
+		assert.JSONEq(t, `{"hello":"world", "go":"lang"}`, string(inputSchema.Properties["labels"].Default))
 		// Empty string and empty array should not have defaults set
-		assert.Nil(t, flagsSchema.Properties["output"].Default)
-		assert.Nil(t, flagsSchema.Properties["include"].Default)
+		assert.Nil(t, inputSchema.Properties["output"].Default)
+		assert.Nil(t, inputSchema.Properties["include"].Default)
 
 		// json schema defaults are not populated
-		assert.Nil(t, flagsSchema.Properties["a_json_obj"].Default)
-		assert.Nil(t, flagsSchema.Properties["a_json_array"].Default)
+		assert.Nil(t, inputSchema.Properties["a_json_obj"].Default)
+		assert.Nil(t, inputSchema.Properties["a_json_array"].Default)
 
 		// verify json obj schemas - compare key fields rather than full schema
 		// because PropertyOrder handling changed between jsonschema-go versions
-		parsedJSONObjSchema := flagsSchema.Properties["a_json_obj"]
+		parsedJSONObjSchema := inputSchema.Properties["a_json_obj"]
 		assert.Equal(t, aJSONObjSchema.Type, parsedJSONObjSchema.Type)
 		assert.Equal(t, aJSONObjSchema.Required, parsedJSONObjSchema.Required)
 		assert.Equal(t, len(aJSONObjSchema.Properties), len(parsedJSONObjSchema.Properties))
 
 		// Verify array items schema
-		includeSchema := flagsSchema.Properties["include"]
+		includeSchema := inputSchema.Properties["include"]
 		assert.NotNil(t, includeSchema.Items)
 		assert.Equal(t, "integer", includeSchema.Items.Type)
-		greetingSchema := flagsSchema.Properties["greeting"]
+		greetingSchema := inputSchema.Properties["greeting"]
 		assert.NotNil(t, greetingSchema.Items)
 		assert.Equal(t, "string", greetingSchema.Items.Type)
 
 		// Verify stringToString object schema
-		labelsSchema := flagsSchema.Properties["labels"]
+		labelsSchema := inputSchema.Properties["labels"]
 		assert.NotNil(t, labelsSchema.AdditionalProperties)
 		assert.Equal(t, "string", labelsSchema.AdditionalProperties.Type)
 
 		// Verify stringToInt object schema
-		portsSchema := flagsSchema.Properties["ports"]
+		portsSchema := inputSchema.Properties["ports"]
 		assert.NotNil(t, portsSchema.AdditionalProperties)
 		assert.Equal(t, "integer", portsSchema.AdditionalProperties.Type)
 
-		// Verify persistent flag from parent command
-		assert.Contains(t, flagsSchema.Properties, "config", "Should include persistent flag from parent command")
+		// Verify persistent flag from parent command appears at the top level.
+		assert.Contains(t, inputSchema.Properties, "config",
+			"Should include persistent flag from parent command")
 
-		// Verify positional args schema.
 		// cmd.Use = "test [file]" → parsed as optional named arg "file"
-		// → schema uses "args" object with named properties.
-		assert.Contains(t, inputSchema.Properties, "args",
-			"Should have args object when cmd.Use has named arg tokens")
+		// In the flat schema this appears as a direct top-level property.
+		assert.Contains(t, inputSchema.Properties, "file",
+			"Should have 'file' property at top level when cmd.Use has named arg tokens")
 		assert.NotContains(t, inputSchema.Properties, "positional_args",
 			"positional_args key should not exist")
 
-		positionalSchema := inputSchema.Properties["args"]
-		assert.Equal(t, "object", positionalSchema.Type)
-		require.NotNil(t, positionalSchema.Properties)
-		assert.Contains(t, positionalSchema.Properties, "file",
-			"args should have a 'file' property matching the [file] token")
-
-		fileArgSchema := positionalSchema.Properties["file"]
+		fileArgSchema := inputSchema.Properties["file"]
 		assert.Equal(t, "string", fileArgSchema.Type)
 		// [file] is optional → not in Required list
-		assert.NotContains(t, positionalSchema.Required, "file",
+		assert.NotContains(t, inputSchema.Required, "file",
 			"Optional arg [file] should not be required")
+
+		// Verify meta contains the expected flag names and arg specs.
+		assert.Contains(t, meta.flagNames, "output")
+		assert.Contains(t, meta.flagNames, "verbose")
+		assert.Contains(t, meta.flagNames, "count")
+		assert.Contains(t, meta.flagNames, "config")
+		assert.NotContains(t, meta.flagNames, "file", "positional arg should not be in flagNames")
+		require.Len(t, meta.argSpecs, 1)
+		assert.Equal(t, "file", meta.argSpecs[0].Name)
 	})
 
 	t.Run("Restricted Selector", func(t *testing.T) {
@@ -258,7 +261,7 @@ func TestCreateToolFromCmd(t *testing.T) {
 		}
 
 		// Create tool from command with the restricted selector
-		tool := selector.createToolFromCmd(cmd, "parent")
+		tool, _ := selector.createToolFromCmd(cmd, "parent")
 
 		// Verify tool properties
 		assert.Equal(t, "parent_test", tool.Name)
@@ -270,33 +273,33 @@ func TestCreateToolFromCmd(t *testing.T) {
 		inputSchema := parseRawInputSchema(t, tool.RawInputSchema)
 		assert.Equal(t, "object", inputSchema.Type)
 		require.NotNil(t, inputSchema.Properties)
-		assert.Contains(t, inputSchema.Properties, "flags")
 
-		// Verify flags schema
-		flagsSchema := inputSchema.Properties["flags"]
-		require.NotNil(t, flagsSchema.Properties)
-		assert.Contains(t, flagsSchema.Properties, "output")
-		assert.Contains(t, flagsSchema.Properties, "verbose")
+		// Flat schema — no nested wrappers.
+		assert.NotContains(t, inputSchema.Properties, "flags")
+		assert.NotContains(t, inputSchema.Properties, "args")
+
+		assert.Contains(t, inputSchema.Properties, "output")
+		assert.Contains(t, inputSchema.Properties, "verbose")
 
 		// Verify excluded flags
-		assert.NotContains(t, flagsSchema.Properties, "hidden", "Should not include hidden flag")
-		assert.NotContains(t, flagsSchema.Properties, "old", "Should not include deprecated flag")
-		assert.NotContains(t, flagsSchema.Properties, "include", "Should not include excluded flag")
-		assert.NotContains(t, flagsSchema.Properties, "count", "Should not include excluded flag")
-		assert.NotContains(t, flagsSchema.Properties, "config", "Should not include excluded persistent flag")
-		assert.NotContains(t, flagsSchema.Properties, "greeting", "Should not include excluded flag")
-		assert.NotContains(t, flagsSchema.Properties, "labels", "Should not include excluded flag")
-		assert.NotContains(t, flagsSchema.Properties, "ports", "Should not include excluded flag")
+		assert.NotContains(t, inputSchema.Properties, "hidden", "Should not include hidden flag")
+		assert.NotContains(t, inputSchema.Properties, "old", "Should not include deprecated flag")
+		assert.NotContains(t, inputSchema.Properties, "include", "Should not include excluded flag")
+		assert.NotContains(t, inputSchema.Properties, "count", "Should not include excluded flag")
+		assert.NotContains(t, inputSchema.Properties, "config", "Should not include excluded persistent flag")
+		assert.NotContains(t, inputSchema.Properties, "greeting", "Should not include excluded flag")
+		assert.NotContains(t, inputSchema.Properties, "labels", "Should not include excluded flag")
+		assert.NotContains(t, inputSchema.Properties, "ports", "Should not include excluded flag")
 
 		// Verify required flags - none should be required since 'count' was excluded
-		require.Empty(t, flagsSchema.Required, "Should have no required flags")
+		assert.NotContains(t, inputSchema.Required, "count", "Excluded count flag should not be required")
 
-		// cmd.Use = "test [file]" → "args" object schema
-		assert.Contains(t, inputSchema.Properties, "args")
+		// Positional arg from cmd.Use = "test [file]" should still appear.
+		assert.Contains(t, inputSchema.Properties, "file")
 		assert.NotContains(t, inputSchema.Properties, "positional_args")
 	})
 
-	t.Run("No positional args - no args property", func(t *testing.T) {
+	t.Run("No positional args - no extra property", func(t *testing.T) {
 		// A command with no positional argument tokens in cmd.Use should have
 		// neither an "args" nor a "positional_args" property in its schema.
 		noArgCmd := &cobra.Command{
@@ -304,7 +307,7 @@ func TestCreateToolFromCmd(t *testing.T) {
 			Short: "No positional args",
 			Run:   func(_ *cobra.Command, _ []string) {},
 		}
-		tool := Selector{}.createToolFromCmd(noArgCmd, "root")
+		tool, _ := Selector{}.createToolFromCmd(noArgCmd, "root")
 		schema := parseRawInputSchema(t, tool.RawInputSchema)
 		assert.NotContains(t, schema.Properties, "args",
 			"Should not have args property when cmd.Use has no named arg tokens")
@@ -318,12 +321,12 @@ func TestCreateToolFromCmd(t *testing.T) {
 			Short: "Create something",
 			Run:   func(_ *cobra.Command, _ []string) {},
 		}
-		tool := Selector{}.createToolFromCmd(reqArgCmd, "root")
+		tool, _ := Selector{}.createToolFromCmd(reqArgCmd, "root")
 		schema := parseRawInputSchema(t, tool.RawInputSchema)
-		positional := schema.Properties["args"]
-		require.NotNil(t, positional)
-		assert.Contains(t, positional.Required, "name",
-			"Required arg <name> should be in Required list")
+		// In flat schema the positional arg is a direct top-level property.
+		require.Contains(t, schema.Properties, "name")
+		assert.Contains(t, schema.Required, "name",
+			"Required arg <name> should be in top-level Required list")
 	})
 
 	t.Run("Variadic positional arg", func(t *testing.T) {
@@ -332,14 +335,13 @@ func TestCreateToolFromCmd(t *testing.T) {
 			Short: "Run targets",
 			Run:   func(_ *cobra.Command, _ []string) {},
 		}
-		tool := Selector{}.createToolFromCmd(varArgCmd, "root")
+		tool, _ := Selector{}.createToolFromCmd(varArgCmd, "root")
 		schema := parseRawInputSchema(t, tool.RawInputSchema)
-		positional := schema.Properties["args"]
-		require.NotNil(t, positional)
-		require.Contains(t, positional.Properties, "targets")
-		assert.Equal(t, "array", positional.Properties["targets"].Type,
+		// In flat schema the positional arg is a direct top-level property.
+		require.Contains(t, schema.Properties, "targets")
+		assert.Equal(t, "array", schema.Properties["targets"].Type,
 			"Variadic arg should be an array type")
-		assert.Contains(t, positional.Required, "targets")
+		assert.Contains(t, schema.Required, "targets")
 	})
 
 	t.Run("Positional arg with annotation description", func(t *testing.T) {
@@ -352,18 +354,17 @@ func TestCreateToolFromCmd(t *testing.T) {
 				AnnotationArgPrefix + "1": "Brief title describing the incident",
 			},
 		}
-		tool := Selector{}.createToolFromCmd(annotCmd, "root")
+		tool, _ := Selector{}.createToolFromCmd(annotCmd, "root")
 		schema := parseRawInputSchema(t, tool.RawInputSchema)
-		positional := schema.Properties["args"]
-		require.NotNil(t, positional)
-		require.Contains(t, positional.Properties, "module")
-		require.Contains(t, positional.Properties, "title")
+		// Both positional args appear as flat top-level properties.
+		require.Contains(t, schema.Properties, "module")
+		require.Contains(t, schema.Properties, "title")
 		assert.Equal(t, "The on-call module name (e.g. 'bke', 'kafka')",
-			positional.Properties["module"].Description)
+			schema.Properties["module"].Description)
 		assert.Equal(t, "Brief title describing the incident",
-			positional.Properties["title"].Description)
-		assert.Contains(t, positional.Required, "module")
-		assert.NotContains(t, positional.Required, "title")
+			schema.Properties["title"].Description)
+		assert.Contains(t, schema.Required, "module")
+		assert.NotContains(t, schema.Required, "title")
 	})
 }
 
