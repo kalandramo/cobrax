@@ -405,7 +405,14 @@ func (s *MCPServer) runInProcess(ctx context.Context, req mcp.CallToolRequest, i
 		s.rootCmd.SetErr(&stderr)
 
 		s.rootCmd.SetArgs(args)
-		execErr = s.rootCmd.ExecuteContext(ctx)
+		// Detach the tool's execution context from the caller's cancellation
+		// signal. The caller (e.g. an AI runner streaming loop) may cancel its
+		// context as soon as it receives the tool result, which would abort any
+		// in-flight I/O inside the command (e.g. a Lark API call) even though
+		// the work itself has already succeeded. context.WithoutCancel preserves
+		// all values (trace IDs, span context, etc.) while preventing the
+		// cancellation from propagating into the command's execution.
+		execErr = s.rootCmd.ExecuteContext(context.WithoutCancel(ctx))
 	}()
 
 	if execErr != nil {
