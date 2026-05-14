@@ -357,6 +357,24 @@ func (s *MCPServer) runInProcess(ctx context.Context, req mcp.CallToolRequest, i
 	// in MCP tool names (e.g. "/").
 	cmdPath := s.toolPaths[name]
 
+	// Normalise input.Args: some LLMs pass positional arguments as a bare
+	// scalar string (e.g. {"args": "1"}) instead of the structured object the
+	// schema describes (e.g. {"args": {"level": "1"}}). When that happens,
+	// decodeToolInput's map type-assertion fails and input.Args ends up nil,
+	// causing the positional argument to be silently dropped.
+	//
+	// Recover by re-reading the raw "args" value from the request. When it is
+	// a non-nil, non-map value and we have at least one ArgSpec, wrap it in a
+	// single-key map using the first spec's name so that collectPositionalArgs
+	// can pick it up correctly.
+	if input.Args == nil && len(specs) > 0 {
+		if rawVal := req.GetArguments()["args"]; rawVal != nil {
+			if _, isMap := rawVal.(map[string]any); !isMap {
+				input.Args = map[string]any{specs[0].Name: rawVal}
+			}
+		}
+	}
+
 	// Build CLI args from the stored command path and the tool input.
 	args := buildInProcessArgsFromPath(cmdPath, input, specs)
 	slog.Info("in-process command args", "tool", name, "args", args)
