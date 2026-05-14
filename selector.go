@@ -93,13 +93,10 @@ func (s Selector) buildFlatSchema(cmd *cobra.Command) (*jsonschema.Schema, toolM
 		flagNames: make(map[string]struct{}),
 	}
 
-	// basic filters: skip hidden and deprecated flags, but allow "help" through
-	// separately so it can be explicitly added to the schema below.
+	// basic filters: skip hidden, deprecated, and the built-in help flag.
+	// help is cobra-internal and not useful as an MCP tool parameter.
 	filter := func(flag *pflag.Flag) bool {
-		if flag.Name == "help" {
-			return true // handled explicitly below
-		}
-		return flag.Hidden || flag.Deprecated != ""
+		return flag.Name == "help" || flag.Hidden || flag.Deprecated != ""
 	}
 
 	// Process local flags — add directly to the top-level schema.
@@ -129,13 +126,6 @@ func (s Selector) buildFlatSchema(cmd *cobra.Command) (*jsonschema.Schema, toolM
 		flags.AddFlagToSchema(schema, flag)
 		meta.flagNames[flag.Name] = struct{}{}
 	})
-
-	// Explicitly add the help flag (-h/--help).
-	schema.Properties["help"] = &jsonschema.Schema{
-		Type:        "boolean",
-		Description: "Display help information for this command (-h/--help)",
-	}
-	meta.flagNames["help"] = struct{}{}
 
 	// Add positional argument properties directly to the top-level schema.
 	specs := parseArgSpecs(cmd)
