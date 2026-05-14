@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // MCPOptions holds configuration for the MCP (Model Context Protocol) server.
@@ -84,6 +86,11 @@ type MCPServer struct {
 	// engineer the path from the tool name, which breaks when rootCmd.Name()
 	// contains characters that are illegal in MCP tool names (e.g. "/").
 	toolPaths map[string][]string
+	// mu protects rootCmd from concurrent access during in-process tool
+	// execution. The reset → SetArgs → ExecuteContext sequence must be
+	// atomic: a second goroutine must not interleave its own reset or SetArgs
+	// between another goroutine's reset and Execute.
+	mu sync.Mutex
 }
 
 // ServerOption is a functional option for configuring the MCPServer.
@@ -354,15 +361,36 @@ func (s *MCPServer) runInProcess(ctx context.Context, req mcp.CallToolRequest, i
 	args := buildInProcessArgsFromPath(cmdPath, input, specs)
 	slog.Info("in-process command args", "tool", name, "args", args)
 
-	// Capture output by replacing the root command's output writers.
+	// stdout/stderr buffers are declared outside the lock: they are only
+	// accessed by this goroutine and do not need mutual exclusion.
 	var stdout, stderr bytes.Buffer
-	s.rootCmd.SetOut(&stdout)
-	s.rootCmd.SetErr(&stderr)
 
-	// Set the args on the root command and execute.
-	s.rootCmd.SetArgs(args)
+	// Acquire the lock for the entire reset → SetOut/SetErr → SetArgs →
+	// ExecuteContext sequence. All four steps operate on shared rootCmd
+	// state and must be atomic with respect to other concurrent tool calls.
 	exitCode := 0
-	if execErr := s.rootCmd.ExecuteContext(ctx); execErr != nil {
+	var execErr error
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		// Reset all flags in the command tree to their default values.
+		// Because rootCmd and its sub-commands are reused across multiple
+		// in-process tool invocations, pflag values set by a previous call
+		// (e.g. --list=true) would otherwise persist into the next call even
+		// when the flag is absent from the new argument list.
+		resetFlagsRecursive(s.rootCmd)
+
+		// Redirect output writers inside the lock so no other invocation
+		// can overwrite them between our reset and Execute.
+		s.rootCmd.SetOut(&stdout)
+		s.rootCmd.SetErr(&stderr)
+
+		s.rootCmd.SetArgs(args)
+		execErr = s.rootCmd.ExecuteContext(ctx)
+	}()
+
+	if execErr != nil {
 		// cobra surfaces RunE errors here; treat them as exit code 1.
 		slog.Warn("in-process command returned error", "tool", name, "error", execErr)
 		exitCode = 1
@@ -417,4 +445,24 @@ func buildInProcessArgsFromPath(cmdPath []string, input ToolInput, specs []ArgSp
 	}
 
 	return parts
+}
+
+// resetFlagsRecursive walks the entire cobra command tree rooted at cmd and
+// resets every flag (both local and persistent/inherited) to its default value.
+//
+// This must be called before each in-process ExecuteContext call because cobra
+// reuses the same Command objects across multiple invocations. Without a reset,
+// a flag set to a non-default value (e.g. --list=true) during one tool call
+// will bleed into the next call even if the flag is absent from the new args.
+func resetFlagsRecursive(cmd *cobra.Command) {
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		if f.Changed {
+			// Reset the flag value to its default and clear the Changed marker.
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		}
+	})
+	for _, sub := range cmd.Commands() {
+		resetFlagsRecursive(sub)
+	}
 }
