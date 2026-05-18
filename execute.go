@@ -28,28 +28,13 @@ func initExecPath() string {
 	return path
 }
 
-// execute runs the CLI tool by re-invoking the current binary as a subprocess.
-//
-// This is the execution model used by the original [Config]-based API. The MCP
-// server process re-launches itself with the decoded command arguments, captures
-// stdout/stderr, and returns them in a [ToolOutput].
+// execSubprocess re-invokes the current binary with args, captures
+// stdout/stderr, and returns a ToolOutput.
 //
 // Non-zero exit codes are surfaced in ToolOutput.ExitCode rather than as Go
 // errors. A Go error is only returned if the subprocess cannot be launched at
 // all (e.g. the binary is not found or lacks execute permission).
-func execute(ctx context.Context, request mcp.CallToolRequest, input ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
-	name := request.Params.Name
-	slog.Info("subprocess MCP tool request received", "tool", name)
-
-	// Build the argument slice from the tool name and input.
-	args := buildCommandArgs(name, input)
-	slog.Debug("executing subprocess command",
-		"tool", name,
-		"input", input,
-		"args", args,
-	)
-
-	// Launch the subprocess and capture its output.
+func execSubprocess(ctx context.Context, args []string) (ToolOutput, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, executablePath, args...)
 	cmd.Stdout = &stdout
@@ -64,16 +49,35 @@ func execute(ctx context.Context, request mcp.CallToolRequest, input ToolInput) 
 			exitCode = exitErr.ExitCode()
 		} else {
 			// A non-exit error means the subprocess could not start at all.
-			slog.Error("subprocess failed to launch", "tool", name, "error", err)
-			return nil, ToolOutput{}, err
+			return ToolOutput{}, err
 		}
 	}
 
-	return nil, ToolOutput{
+	return ToolOutput{
 		StdOut:   stdout.String(),
 		StdErr:   stderr.String(),
 		ExitCode: exitCode,
 	}, nil
+}
+
+// execute runs the CLI tool by re-invoking the current binary as a subprocess.
+//
+// This is the execution model used by the original [Config]-based API. The MCP
+// server process re-launches itself with the decoded command arguments, captures
+// stdout/stderr, and returns them in a [ToolOutput].
+func execute(ctx context.Context, request mcp.CallToolRequest, input ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
+	name := request.Params.Name
+	slog.Info("subprocess MCP tool request received", "tool", name)
+
+	args := buildCommandArgs(name, input)
+	slog.Debug("executing subprocess command", "tool", name, "input", input, "args", args)
+
+	output, err := execSubprocess(ctx, args)
+	if err != nil {
+		slog.Error("subprocess failed to launch", "tool", name, "error", err)
+		return nil, ToolOutput{}, err
+	}
+	return nil, output, nil
 }
 
 // splitToolName splits a tool name such as "myapp_sub_command" into its

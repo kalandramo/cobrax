@@ -28,6 +28,7 @@ func Command(config *Config) *cobra.Command {
 		startCommand(config),
 		toolCommand(config),
 		streamCommand(config),
+		restCommand(config),
 		claude.Command(name, defaultEnv),
 		vscode.Command(name, defaultEnv),
 		cursor.Command(name, defaultEnv),

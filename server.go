@@ -373,6 +373,14 @@ func (s *MCPServer) runInProcess(ctx context.Context, req mcp.CallToolRequest, i
 		// when the flag is absent from the new argument list.
 		resetFlagsRecursive(s.rootCmd)
 
+		// Reset the ctx field on every sub-command to nil so that cobra's
+		// context-propagation logic in ExecuteC ("if cmd.ctx == nil { cmd.ctx =
+		// c.ctx }") fires correctly for this invocation.  Without this reset a
+		// sub-command retains the context from its previous invocation, causing
+		// cmd.Context() inside RunE to return a stale context (e.g. the
+		// DynamicRuntime from a different request).
+		resetCtxRecursive(s.rootCmd)
+
 		// Redirect output writers inside the lock so no other invocation
 		// can overwrite them between our reset and Execute.
 		s.rootCmd.SetOut(&stdout)
@@ -461,5 +469,28 @@ func resetFlagsRecursive(cmd *cobra.Command) {
 	})
 	for _, sub := range cmd.Commands() {
 		resetFlagsRecursive(sub)
+	}
+}
+
+// resetCtxRecursive walks the cobra command tree rooted at cmd and sets the
+// ctx field on every command (including cmd itself) to nil.
+//
+// cobra's ExecuteC propagates the root context to sub-commands lazily:
+//
+//	if cmd.ctx == nil { cmd.ctx = c.ctx }
+//
+// Because cobra reuses the same *cobra.Command objects across invocations, a
+// sub-command that was executed in a previous tool call retains the context
+// from that call.  On the next call the sub-command's ctx is non-nil, so the
+// propagation guard is skipped and cmd.Context() returns the stale context
+// (e.g. a DynamicRuntime carrying state from a different request).
+//
+// Resetting ctx to nil before each ExecuteContext call ensures that the
+// propagation guard fires correctly and every invocation receives its own
+// fresh context.
+func resetCtxRecursive(cmd *cobra.Command) {
+	cmd.SetContext(nil)
+	for _, sub := range cmd.Commands() {
+		resetCtxRecursive(sub)
 	}
 }

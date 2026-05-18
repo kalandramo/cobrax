@@ -71,7 +71,8 @@ type Config struct {
 
 	server         *mcpserver.MCPServer
 	tools          []*mcp.Tool
-	toolNamePrefix string // resolved prefix (either ToolNamePrefix or root command name)
+	toolMetas      map[string]toolMeta // tool name → registration-time metadata
+	toolNamePrefix string              // resolved prefix (either ToolNamePrefix or root command name)
 }
 
 // commandName returns the configured CommandName, defaulting to "mcp".
@@ -137,6 +138,9 @@ func (c *Config) registerTools(cmd *cobra.Command) {
 		rootCmd.Version,
 	)
 
+	// initialise tool metadata map
+	c.toolMetas = make(map[string]toolMeta)
+
 	// ensure at least one selector exists for tool creation logic
 	if len(c.Selectors) == 0 {
 		c.Selectors = []Selector{{}}
@@ -184,6 +188,9 @@ func (c *Config) registerToolsRecursive(cmd *cobra.Command) {
 
 		// add tool to manager's tool list (for `tools` command)
 		c.tools = append(c.tools, tool)
+
+		// store metadata for REST and other consumers
+		c.toolMetas[tool.Name] = meta
 
 		// only the first matching selector is used
 		break
