@@ -46,7 +46,7 @@ func main() {
 				Addr:    addr,
 				Name:    "myops",
 				Version: "0.1.0",
-			}, rootCmd)
+			}, buildRootCmd)
 			if err != nil {
 				return fmt.Errorf("create MCP server: %w", err)
 			}

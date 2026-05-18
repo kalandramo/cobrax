@@ -28,7 +28,7 @@ func main() {
 		Name:    "test",
 		Version: "0.1",
 	}
-	s, _ := cobrax.NewMCPServer(cfg, buildRootCmd())
+	s, _ := cobrax.NewMCPServer(cfg, buildRootCmd)
 	s.Start(context.Background())
 }
 

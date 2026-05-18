@@ -8,13 +8,11 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 )
 
 // MCPOptions holds configuration for the MCP (Model Context Protocol) server.
@@ -43,25 +41,27 @@ type MCPOptions struct {
 
 // MCPServer is an MCP server that exposes Cobra commands as MCP tools.
 //
-// Unlike the subprocess-based execution model used by [Config], MCPServer runs
-// every tool handler in-process by directly invoking the matched cobra.Command.
-// This means all dependencies captured in command closures (database clients,
-// API clients, business-logic objects, etc.) are available at call time without
-// any extra wiring — the caller simply constructs the cobra.Command tree with
-// its dependencies already injected before passing it to [NewMCPServer].
+// Each tool invocation calls cmdFactory to produce a fresh *cobra.Command tree,
+// which means every call gets its own Options structs, flag values, ctx fields,
+// and closure-captured variables. No shared mutable state exists between
+// concurrent or sequential tool calls, so no mutex or reset logic is required.
 //
 // Example:
 //
 //	biz := newBotSreBiz(client, clientset, ...)
-//	root := cobra.Command{Use: "myapp"}
-//	root.AddCommand(sre.NewOpenCmd(biz, ioStreams))
+//
+//	factory := func() *cobra.Command {
+//	    root := &cobra.Command{Use: "myapp"}
+//	    root.AddCommand(sre.NewOpenCmd(biz, ioStreams))
+//	    return root
+//	}
 //
 //	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{
 //	    Enabled: true,
 //	    Addr:    ":8090",
 //	    Name:    "myapp",
 //	    Version: "1.0.0",
-//	}, &root)
+//	}, factory)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -71,26 +71,25 @@ type MCPOptions struct {
 type MCPServer struct {
 	opts    MCPOptions
 	server  *mcpserver.MCPServer
-	rootCmd *cobra.Command
-	tools   []*mcp.Tool
+	// cmdFactory is called once per tool invocation to produce a fresh
+	// *cobra.Command tree. This eliminates all shared-state hazards:
+	// each call gets new Options structs, flag values, ctx, RunE/Run
+	// function pointers, and all other closure-captured variables.
+	cmdFactory func() *cobra.Command
+	tools      []*mcp.Tool
 	// selectors holds the set of selector rules used during tool registration.
 	// Defaults to a single catch-all Selector{} when none are configured.
 	selectors []Selector
 	// toolMetas maps tool name → per-tool metadata (flag names + arg specs)
-	// computed at registration time.  Used during in-process execution to split
+	// computed at registration time. Used during in-process execution to split
 	// the flat MCP input back into flags and positional arguments.
 	toolMetas map[string]toolMeta
 	// toolPaths maps tool name → the cobra sub-command path segments to pass
-	// to rootCmd (i.e. the command path with the root name stripped). This is
-	// stored at registration time so that runInProcess never needs to reverse-
-	// engineer the path from the tool name, which breaks when rootCmd.Name()
-	// contains characters that are illegal in MCP tool names (e.g. "/").
+	// to the fresh root command produced by cmdFactory. Stored at registration
+	// time so runInProcess never needs to reverse-engineer the path from the
+	// tool name, which breaks when the root command name contains characters
+	// that are illegal in MCP tool names (e.g. "/").
 	toolPaths map[string][]string
-	// mu protects rootCmd from concurrent access during in-process tool
-	// execution. The reset → SetArgs → ExecuteContext sequence must be
-	// atomic: a second goroutine must not interleave its own reset or SetArgs
-	// between another goroutine's reset and Execute.
-	mu sync.Mutex
 }
 
 // ServerOption is a functional option for configuring the MCPServer.
@@ -106,50 +105,56 @@ func WithSelectors(selectors ...Selector) ServerOption {
 	}
 }
 
-// NewMCPServer constructs an MCPServer by converting every runnable command in
-// rootCommand's tree into an MCP tool.
+// NewMCPServer constructs an MCPServer that exposes Cobra commands as MCP tools.
 //
-// The rootCommand and all its subcommands are walked recursively. For each
-// command that passes the built-in safety filters (not hidden, not deprecated,
-// has a Run/RunE function, is not the built-in help/completion group) a
-// corresponding MCP tool is registered on the returned server.
+// cmdFactory is called once immediately to obtain a reference command tree for
+// tool schema registration (a read-only traversal). It is then called once per
+// tool invocation at runtime to produce a fresh *cobra.Command tree, ensuring
+// that every call gets its own Options structs, flag values, ctx fields, and
+// closure-captured variables with no shared mutable state between calls.
 //
-// Each tool's handler runs the matched cobra.Command in-process, which means
-// any non-cobra dependencies already captured in the command's closure are
-// available at invocation time. stdout and stderr from the command are captured
-// and returned in the ToolOutput.
+// cmdFactory must not be nil and must return a non-nil *cobra.Command each time
+// it is called; NewMCPServer returns an error if either condition is violated.
 //
 // opts.Enabled must be true for Start to actually bind a port; if false, Start
 // is a no-op, which lets callers gate the MCP server behind a feature flag.
-func NewMCPServer(opts MCPOptions, rootCommand *cobra.Command, serverOpts ...ServerOption) (*MCPServer, error) {
-	if rootCommand == nil {
-		return nil, fmt.Errorf("rootCommand must not be nil")
+func NewMCPServer(opts MCPOptions, cmdFactory func() *cobra.Command, serverOpts ...ServerOption) (*MCPServer, error) {
+	if cmdFactory == nil {
+		return nil, fmt.Errorf("cobrax.NewMCPServer: cmdFactory must not be nil")
 	}
 
-	// Resolve server name: prefer opts.Name, fall back to rootCommand.Name().
+	// Call the factory once to obtain a reference tree for schema registration.
+	// This is a read-only traversal; the resulting tree is never executed.
+	schemaCmd := cmdFactory()
+	if schemaCmd == nil {
+		return nil, fmt.Errorf("cobrax.NewMCPServer: cmdFactory returned nil")
+	}
+
+	// Resolve server name: prefer opts.Name, fall back to root command name.
 	name := opts.Name
 	if name == "" {
-		name = rootCommand.Name()
+		name = schemaCmd.Name()
 	}
 
-	version := opts.Version
-
-	mcpSrv := mcpserver.NewMCPServer(name, version)
+	mcpSrv := mcpserver.NewMCPServer(name, opts.Version)
 
 	srv := &MCPServer{
-		opts:      opts,
-		server:    mcpSrv,
-		rootCmd:   rootCommand,
-		selectors: []Selector{{}}, // default catch-all selector
-		toolMetas: make(map[string]toolMeta),
-		toolPaths: make(map[string][]string),
+		opts:       opts,
+		server:     mcpSrv,
+		cmdFactory: cmdFactory,
+		selectors:  []Selector{{}}, // default catch-all selector
+		toolMetas:  make(map[string]toolMeta),
+		toolPaths:  make(map[string][]string),
 	}
 
 	for _, opt := range serverOpts {
 		opt(srv)
 	}
-	// Register all commands from the tree as MCP tools.
-	srv.registerToolsRecursive(rootCommand)
+
+	// Register all commands from the reference tree as MCP tools.
+	// Only schema metadata (tool names, descriptions, flag specs) is read here;
+	// the reference tree is never executed.
+	srv.registerToolsRecursive(schemaCmd)
 
 	return srv, nil
 }
@@ -229,10 +234,10 @@ func (s *MCPServer) registerToolsRecursive(cmd *cobra.Command) {
 	}
 
 	// Build the cobra sub-command path for this command: the full CommandPath()
-	// minus the root command name. This is stored in toolPaths so that
-	// runInProcess can pass the exact segments to rootCmd without having to
-	// reverse-engineer them from the tool name (which would break when
-	// rootCmd.Name() contains characters illegal in MCP tool names, e.g. "/").
+	// minus the root command name. Stored in toolPaths so that runInProcess can
+	// pass the exact segments to the fresh root command without having to
+	// reverse-engineer them from the tool name (which would break when the root
+	// command name contains characters illegal in MCP tool names, e.g. "/").
 	cmdPath := cmdSubPath(cmd)
 
 	// Use an empty tool name prefix so the tool name is derived purely from the
@@ -296,22 +301,18 @@ func (s *MCPServer) cmdFilter(cmd *cobra.Command) bool {
 	return AllowCmdsContaining("help", "completion")(cmd)
 }
 
-// makeInProcessHandler returns a tool handler function that executes cmd
-// in-process rather than as a subprocess.
+// makeInProcessHandler returns a tool handler function that executes a freshly
+// created command tree in-process rather than as a subprocess.
 //
-// The handler:
-//  1. Builds the CLI argument list from the MCP tool input (flags + positional
-//     args), the same way buildCommandArgs does for subprocess execution.
-//  2. Re-uses the original cobra.Command tree already populated with the
-//     caller's dependencies by creating a fresh argument set on rootCmd and
-//     calling ExecuteContext. stdout and stderr are redirected to buffers so
-//     they can be returned in the ToolOutput.
-//  3. Captures the exit code from cobra's error (RunE returning a non-nil error
-//     is treated as exit code 1) and wraps any panic in a Go error.
+// The handler calls s.cmdFactory() on every invocation to obtain a new
+// *cobra.Command tree. This guarantees that:
+//   - All Options structs are freshly allocated (no flag bleed between calls).
+//   - The cobra ctx field starts as nil so ExecuteContext propagates correctly.
+//   - PersistentPreRunE mutations (e.g. --mock=success overwriting RunE/Run)
+//     are confined to the single invocation's tree and never affect other calls.
+//   - warningHandler and other closure-captured variables are brand new each time.
 //
-// Because the cobra.Command's RunE/Run closures already hold references to the
-// caller's runtime objects (e.g. *botSreBiz, API clients), those objects are
-// fully available without any additional wiring.
+// Because no shared mutable state exists, no mutex and no reset logic is needed.
 func (s *MCPServer) makeInProcessHandler(sel Selector, _ *cobra.Command) func(context.Context, mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
 	return func(ctx context.Context, req mcp.CallToolRequest, input ToolInput) (result *mcp.CallToolResult, output ToolOutput, err error) {
 		// Recover from any panic inside the command.
@@ -333,70 +334,44 @@ func (s *MCPServer) makeInProcessHandler(sel Selector, _ *cobra.Command) func(co
 	}
 }
 
-// runInProcess executes the cobra command in-process by setting the argument
-// list on rootCmd and calling ExecuteContext.
+// runInProcess executes a freshly created cobra command tree in-process.
 //
-// stdout and stderr are captured via bytes.Buffer by temporarily replacing the
-// root command's output writers. The original writers are restored after the
-// call to avoid leaking state between tool invocations.
+// A new *cobra.Command tree is produced by calling s.cmdFactory() on every
+// invocation. Because the tree is brand new, there is no shared mutable state
+// to reset, no mutex to acquire, and no risk of flag values, ctx fields, RunE
+// pointers, or Options struct fields leaking between concurrent or sequential
+// tool calls. Concurrent calls are fully independent and execute in parallel.
 func (s *MCPServer) runInProcess(ctx context.Context, req mcp.CallToolRequest, input ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
 	name := req.Params.Name
 	slog.Info("in-process MCP tool request", "tool", name)
 
 	// Retrieve the pre-computed cobra sub-command path for this tool.
-	// This avoids having to reverse-engineer the path from the tool name,
-	// which breaks when rootCmd.Name() contains characters that are illegal
-	// in MCP tool names (e.g. "/").
 	cmdPath := s.toolPaths[name]
 
 	// Build CLI args from the stored command path and the flat tool input.
 	args := buildInProcessArgsFromPath(cmdPath, input)
 	slog.Info("in-process command args", "tool", name, "args", args)
 
-	// stdout/stderr buffers are declared outside the lock: they are only
-	// accessed by this goroutine and do not need mutual exclusion.
+	// Produce a fresh command tree for this invocation.
+	// Every call to cmdFactory allocates new Options structs and closures,
+	// eliminating all shared-state hazards.
+	root := s.cmdFactory()
+
 	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs(args)
 
-	// Acquire the lock for the entire reset → SetOut/SetErr → SetArgs →
-	// ExecuteContext sequence. All four steps operate on shared rootCmd
-	// state and must be atomic with respect to other concurrent tool calls.
+	// Detach the tool's execution context from the caller's cancellation
+	// signal. The caller (e.g. an AI runner streaming loop) may cancel its
+	// context as soon as it receives the tool result, which would abort any
+	// in-flight I/O inside the command (e.g. a Lark API call) even though
+	// the work itself has already succeeded. context.WithoutCancel preserves
+	// all values (trace IDs, DynamicRuntime, span context, etc.) while
+	// preventing the cancellation from propagating into the command's execution.
+	execErr := root.ExecuteContext(context.WithoutCancel(ctx))
+
 	exitCode := 0
-	var execErr error
-	func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-
-		// Reset all flags in the command tree to their default values.
-		// Because rootCmd and its sub-commands are reused across multiple
-		// in-process tool invocations, pflag values set by a previous call
-		// (e.g. --list=true) would otherwise persist into the next call even
-		// when the flag is absent from the new argument list.
-		resetFlagsRecursive(s.rootCmd)
-
-		// Reset the ctx field on every sub-command to nil so that cobra's
-		// context-propagation logic in ExecuteC ("if cmd.ctx == nil { cmd.ctx =
-		// c.ctx }") fires correctly for this invocation.  Without this reset a
-		// sub-command retains the context from its previous invocation, causing
-		// cmd.Context() inside RunE to return a stale context (e.g. the
-		// DynamicRuntime from a different request).
-		resetCtxRecursive(s.rootCmd)
-
-		// Redirect output writers inside the lock so no other invocation
-		// can overwrite them between our reset and Execute.
-		s.rootCmd.SetOut(&stdout)
-		s.rootCmd.SetErr(&stderr)
-
-		s.rootCmd.SetArgs(args)
-		// Detach the tool's execution context from the caller's cancellation
-		// signal. The caller (e.g. an AI runner streaming loop) may cancel its
-		// context as soon as it receives the tool result, which would abort any
-		// in-flight I/O inside the command (e.g. a Lark API call) even though
-		// the work itself has already succeeded. context.WithoutCancel preserves
-		// all values (trace IDs, span context, etc.) while preventing the
-		// cancellation from propagating into the command's execution.
-		execErr = s.rootCmd.ExecuteContext(context.WithoutCancel(ctx))
-	}()
-
 	if execErr != nil {
 		// cobra surfaces RunE errors here; treat them as exit code 1.
 		slog.Warn("in-process command returned error", "tool", name, "error", execErr)
@@ -450,47 +425,4 @@ func buildInProcessArgsFromPath(cmdPath []string, input ToolInput) []string {
 	parts = append(parts, posArgs...)
 
 	return parts
-}
-
-// resetFlagsRecursive walks the entire cobra command tree rooted at cmd and
-// resets every flag (both local and persistent/inherited) to its default value.
-//
-// This must be called before each in-process ExecuteContext call because cobra
-// reuses the same Command objects across multiple invocations. Without a reset,
-// a flag set to a non-default value (e.g. --list=true) during one tool call
-// will bleed into the next call even if the flag is absent from the new args.
-func resetFlagsRecursive(cmd *cobra.Command) {
-	cmd.Flags().VisitAll(func(f *pflag.Flag) {
-		if f.Changed {
-			// Reset the flag value to its default and clear the Changed marker.
-			_ = f.Value.Set(f.DefValue)
-			f.Changed = false
-		}
-	})
-	for _, sub := range cmd.Commands() {
-		resetFlagsRecursive(sub)
-	}
-}
-
-// resetCtxRecursive walks the cobra command tree rooted at cmd and sets the
-// ctx field on every command (including cmd itself) to nil.
-//
-// cobra's ExecuteC propagates the root context to sub-commands lazily:
-//
-//	if cmd.ctx == nil { cmd.ctx = c.ctx }
-//
-// Because cobra reuses the same *cobra.Command objects across invocations, a
-// sub-command that was executed in a previous tool call retains the context
-// from that call.  On the next call the sub-command's ctx is non-nil, so the
-// propagation guard is skipped and cmd.Context() returns the stale context
-// (e.g. a DynamicRuntime carrying state from a different request).
-//
-// Resetting ctx to nil before each ExecuteContext call ensures that the
-// propagation guard fires correctly and every invocation receives its own
-// fresh context.
-func resetCtxRecursive(cmd *cobra.Command) {
-	cmd.SetContext(nil)
-	for _, sub := range cmd.Commands() {
-		resetCtxRecursive(sub)
-	}
 }

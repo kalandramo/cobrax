@@ -29,10 +29,7 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestOncallSchema(t *testing.T) {
-	root := buildRootCmd()
-	root.AddCommand(cobrax.Command(nil))
-
-	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, root)
+	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, buildRootCmd)
 	require.NoError(t, err)
 
 	schema := findToolInputSchema(t, srv, "oncall")
@@ -70,10 +67,7 @@ func TestOncallSchema(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestCpSchema(t *testing.T) {
-	root := buildRootCmd()
-	root.AddCommand(cobrax.Command(nil))
-
-	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, root)
+	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, buildRootCmd)
 	require.NoError(t, err)
 
 	schema := findToolInputSchema(t, srv, "cp")
@@ -98,10 +92,7 @@ func TestCpSchema(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestMakeSchema(t *testing.T) {
-	root := buildRootCmd()
-	root.AddCommand(cobrax.Command(nil))
-
-	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, root)
+	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, buildRootCmd)
 	require.NoError(t, err)
 
 	schema := findToolInputSchema(t, srv, "make")
@@ -130,10 +121,7 @@ func TestMakeSchema(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestKubectlGetSchema(t *testing.T) {
-	root := buildRootCmd()
-	root.AddCommand(cobrax.Command(nil))
-
-	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, root)
+	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, buildRootCmd)
 	require.NoError(t, err)
 
 	// Tool name for "kubectl get" with empty prefix → "kubectl_get"
@@ -159,10 +147,7 @@ func TestKubectlGetSchema(t *testing.T) {
 }
 
 func TestKubectlLogsSchema(t *testing.T) {
-	root := buildRootCmd()
-	root.AddCommand(cobrax.Command(nil))
-
-	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, root)
+	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, buildRootCmd)
 	require.NoError(t, err)
 
 	// "logs <pod> [flags]" — [flags] is ignored by cobrax.
@@ -180,10 +165,7 @@ func TestKubectlLogsSchema(t *testing.T) {
 }
 
 func TestKubectlExecSchema(t *testing.T) {
-	root := buildRootCmd()
-	root.AddCommand(cobrax.Command(nil))
-
-	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, root)
+	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, buildRootCmd)
 	require.NoError(t, err)
 
 	// "exec <pod> <cmd...>" — pod required string, cmd required string array
@@ -210,10 +192,7 @@ func TestKubectlExecSchema(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestToolInventory(t *testing.T) {
-	root := buildRootCmd()
-	root.AddCommand(cobrax.Command(nil))
-
-	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, root)
+	srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{Enabled: false, Name: "myops"}, buildRootCmd)
 	require.NoError(t, err)
 
 	tools := srv.Tools()

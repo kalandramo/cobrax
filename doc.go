@@ -21,8 +21,12 @@
 //
 // # In-Process Usage (NewMCPServer)
 //
-// Construct the cobra command tree with its dependencies already injected, then
-// pass the root command to NewMCPServer:
+// Provide a factory function that produces a fresh *cobra.Command tree on each
+// call. The factory is invoked once at registration time (read-only, for schema
+// generation) and once per tool invocation at runtime. Using a factory ensures
+// that every tool call gets its own Options structs, flag values, and
+// closure-captured variables — eliminating all shared-state hazards and making
+// concurrent tool calls fully independent.
 //
 //	package main
 //
@@ -33,17 +37,22 @@
 //	)
 //
 //	func main() {
-//	    // Dependencies are injected at construction time.
+//	    // Dependencies are injected at construction time and shared safely
+//	    // because they are read-only after initialisation.
 //	    biz := newBotSreBiz(apiClient, dbClient)
 //
-//	    root := buildRootCommand(biz) // adds all subcommands with biz in closures
+//	    // Factory produces a fresh command tree per invocation.
+//	    // Each call allocates new Options structs and closure state.
+//	    factory := func() *cobra.Command {
+//	        return buildRootCommand(biz) // adds all subcommands with biz in closures
+//	    }
 //
 //	    srv, err := cobrax.NewMCPServer(cobrax.MCPOptions{
 //	        Enabled: true,
 //	        Addr:    ":8090",
 //	        Name:    "myapp",
 //	        Version: "1.0.0",
-//	    }, root)
+//	    }, factory)
 //	    if err != nil {
 //	        log.Fatal(err)
 //	    }
