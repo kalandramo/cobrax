@@ -92,7 +92,7 @@ config := &cobrax.Config{
             InheritedFlagSelector: cobrax.NoFlags,  // Exclude persistent flags
 
             // Middleware wraps command execution
-            Middleware: func(ctx context.Context, req *mcp.CallToolRequest, in cobrax.ToolInput, next func(context.Context, *mcp.CallToolRequest, cobrax.ToolInput) (*mcp.CallToolResult, cobrax.ToolOutput, error)) (*mcp.CallToolResult, cobrax.ToolOutput, error) {
+            Middleware: func(ctx context.Context, req *mcp.CallToolRequest, in cobrax.ToolInput, next cobrax.ExecuteFunc) (*mcp.CallToolResult, cobrax.ToolOutput, error) {
                 ctx, cancel := context.WithTimeout(ctx, time.Minute)
                 defer cancel()
                 return next(ctx, req, in)

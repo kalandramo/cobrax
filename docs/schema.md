@@ -1,102 +1,94 @@
 # Schema Generation
 
-Ophis automatically generates JSON schemas for MCP tools from Cobra commands.
+cobrax automatically generates JSON schemas for MCP tools from Cobra commands.
+Flags and positional arguments are flattened into **top-level properties** —
+there is no nested `flags` / `args` object.
 
 ## Tool Properties
 
-- **Name**: Command path with underscores (`kubectl_get_pods`)
-- **Description**: From command's Long, Short, and Example fields
-- **Input Schema**: Generated from flags and arguments
-- **Output Schema**: Standard format (stdout, stderr, exitCode)
+- **Name**: `CommandPath()` with the root name replaced by `ToolNamePrefix`
+  (shortened to satisfy Claude's 64-char limit), spaces → underscores
+  (e.g. `myapp sre open` → `myapp_sre_open`). The in-process model uses an empty
+  prefix, so tool names never include the (possibly illegal) root command name.
+- **Description**: `Long` > `Short` > fallback `"Execute the X command"`,
+  with `Example` appended. Long/Example are the primary channel for teaching
+  the LLM how to call the tool.
+- **Annotations**: `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`,
+  `openWorldHint` are read from `cmd.Annotations` (booleans parsed with
+  `strconv.ParseBool`).
 
-## Input Schema
-
-### Flags
-
-Each flag becomes a property with:
-
-**Type mapping:**
-
-- `bool` → `boolean`
-- `int`, `uint` → `integer`
-- `float` → `number`
-- `string` → `string`
-- `string` → `<JSON schema>` if the flag has an annotation called `jsonschema` with a value that is the JSON string representation of the schema
-- `stringSlice`, `intSlice` → `array`
-- `duration`, `ip`, `ipNet` → `string` with pattern validation
-
-Flags marked as required (via `cmd.MarkFlagRequired()`) are included in the schema's `required` array. Default values are included in the schema, except for empty strings (`""`) and empty arrays (`[]`).
-
-**Example:**
+## Input Schema (flat)
 
 ```json
 {
-  "flags": {
-    "type": "object",
-    "properties": {
-      "namespace": {
-        "type": "string",
-        "description": "Kubernetes namespace",
-        "default": "default"
-      },
-      "replicas": {
-        "type": "integer",
-        "default": 3
-      },
-      "labels": {
-        "type": "array",
-        "items": { "type": "string" }
-      }
-    },
-    "required": ["namespace"]
-  }
+  "type": "object",
+  "properties": {
+    "namespace": { "type": "string", "description": "Kubernetes namespace", "default": "default" },
+    "resource":  { "type": "string", "description": "Resource type (required)…" },
+    "name":      { "type": "string", "description": "Resource name (optional)…" }
+  },
+  "required": ["resource"],
+  "additionalProperties": { "not": {} }
 }
 ```
 
-Example showing JSON schema:
+`additionalProperties: not{}` forbids undeclared fields. The registration-time
+metadata (`toolMeta`: flag property names + ordered arg specs) is generated
+together with the schema — the two must stay in sync so the flat map can be
+split back into CLI arguments at execution time.
 
-```golang
+### Flag type mapping
 
-type SomeJsonObject struct {
-	Foo    string
-	Bar    int
-	FooBar struct {
-		Baz string
-	}
-}
+| pflag type | JSON Schema |
+|------------|-------------|
+| `bool` | `boolean` |
+| `int*` / `uint*` / `count` | `integer` |
+| `float32`/`float64` | `number` |
+| `string` | `string`; if the flag has a `jsonschema` annotation, replaced wholesale by that custom schema |
+| slices (`stringSlice`, `intSlice`, …) | `array` |
+| `stringToString` | `object` (additionalProperties: string) |
+| `stringToInt(64)` | `object` (additionalProperties: integer) |
+| `duration` | `string` + pattern `^-?([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$` |
+| `ip` / `ipNet` / `bytesHex` / `bytesBase64` | `string` + pattern |
+| unknown | `string` + `(type: xxx)` in description |
 
-// generate schema for our object
-aJsonObjSchema, err := jsonschema.For[SomeJsonObject](nil)
-if err != nil {
-	// do something better than this in prod
-	panic(err)
-}
-bytes, err := aJsonObjSchema.MarshalJSON()
-if err != nil {
-    // do something better than this in prod
-    panic(err)
-}
-// now create flag that has a json schema that represents a json object
-cmd.Flags().String("a_json_obj", "", "Some JSON Object")
-jsonobj := cmd.Flags().Lookup("a_json_obj")
-jsonobj.Annotations = make(map[string][]string)
-jsonobj.Annotations["jsonschema"] = []string{string(bytes)}
+- **required**: read from cobra's `MarkFlagRequired` annotation.
+- **defaults**: parsed from `flag.DefValue` (pflag array defaults like `"[a,b]"`
+  are split and typed; `"[]"` means empty).
+- **Custom schema escape hatch**: a string flag may carry a `jsonschema`
+  annotation holding a full JSON Schema (e.g. built with
+  `jsonschema.For[SomeStruct](nil)`), letting the LLM pass a whole JSON object:
 
+```go
+schema, _ := jsonschema.For[SomeJsonObject](nil)
+bytes, _ := schema.MarshalJSON()
+f := cmd.Flags().Lookup("a_json_obj")
+f.Annotations = map[string][]string{"jsonschema": {string(bytes)}}
 ```
 
-### Arguments
+### Positional arguments
 
-Positional arguments are a string array:
+Parsed from `cmd.Use` token syntax:
 
-```json
-{
-  "args": {
-    "type": "array",
-    "description": "Positional arguments\nUsage: [NAME] [flags]",
-    "items": { "type": "string" }
-  }
+| cmd.Use | Meaning | Schema |
+|---------|---------|--------|
+| `<module>` | required single | `string`, in `required` |
+| `[title]` | optional single | `string` |
+| `[targets...]` / `<files...>` | variadic | `array` of string |
+| `[flags]` | cobra sentinel | silently skipped |
+
+Argument descriptions (critical for LLM fill quality) come from annotations —
+index-based, priority over the synthesized fallback:
+
+```go
+cmd.Annotations = map[string]string{
+    cobrax.AnnotationArgPrefix + "0": "The on-call module (bke, kafka, redis)…",
+    cobrax.AnnotationArgPrefix + "1": "Brief incident title…",
 }
 ```
+
+Cobra `Args` validators (`RangeArgs`, …) do not participate in schema generation;
+the underlying command validates at execution time.
 
 ## Output Schema
 

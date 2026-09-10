@@ -452,7 +452,7 @@ srv.Start(ctx)
 
 ## 10. 现状与注意点
 
-- `docs/execution.md`、`docs/schema.md` 是嵌套 Schema 时代的旧文档，与当前扁平实现不符，以本文与代码注释为准。
+- `docs/execution.md`、`docs/schema.md` 已按当前扁平 Schema 实现重写（2026-09-10），与本文一致。
 - `examples/positional-args-mcp-server/` 是位置参数四种模式（必填+可选、双必填、变参、子命令树）与进程内模型的活参考。
 - 进程内模型的 `MCPServer.Start` 仅支持 SSE（`server.go:199`），stdio 仅供子进程模型（`Config.serveStdio`）。
-- Selector 中间件的签名在 README（`func` 类型带 `next func`）与代码（命名类型 `ExecuteFunc`）间有轻微出入，以代码为准。
+- README 中间件签名已对齐代码（`next cobrax.ExecuteFunc`）。

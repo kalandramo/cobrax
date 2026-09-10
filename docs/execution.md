@@ -1,60 +1,84 @@
 # Tool Execution
 
-When an AI assistant calls an MCP tool, Ophis executes your CLI as a subprocess.
+When an AI assistant calls an MCP tool, cobrax turns the flat JSON arguments back
+into CLI arguments and runs the command. Two execution models are supported.
 
-## Execution Flow
+## Flat Input
 
-1. **Middleware** (optional) - Wraps execution with custom logic
-2. **Command Execution** - Spawns CLI subprocess, captures output
+MCP clients send **all parameters (flags and positional arguments) as flat
+top-level properties** — there is no nested `flags` / `args` object:
 
-## Command Construction
-
-MCP tool calls become CLI invocations:
-
-**Input:**
 ```json
 {
-  "name": "kubectl_get_pods",
+  "name": "myapp_get_pods",
   "arguments": {
-    "flags": {
-      "namespace": "production",
-      "output": "json"
-    },
-    "args": ["web-server"]
+    "namespace": "production",
+    "output": "json",
+    "resource": "pods",
+    "name": "web-server"
   }
 }
 ```
 
-**Constructed:**
-```bash
-/path/to/kubectl get pods --namespace production --output json web-server
+At registration time cobrax records a `toolMeta` (the flag property names and the
+ordered positional-arg specs) alongside the generated schema. At execution time
+`splitFlatInput` uses that metadata to split the flat map back into flags and
+positional arguments:
+
+```
+FlatInput (flat map)
+    ├── keys hit by FlagNames → flagMap
+    └── keys in ArgNames order → posArgs (variadic arrays expanded)
+    ↓
+buildFlagArgs → CLI flag token sequence
 ```
 
-**Flag conversion:**
-- Boolean: `true` → `--flag`, `false` → omitted
-- String/numeric: `--flag value`
-- Arrays: `--flag a --flag b`
-- Null/empty: omitted
+## Execution Flow
+
+1. **Middleware** (optional, per-selector) — wraps execution, always guarded by `recover`
+2. **Execution** — one of:
+
+| Model | How it runs | Best for |
+|-------|-------------|----------|
+| Subprocess (`cobrax.Command`) | Re-invokes `os.Executable()` as a child process per call | CLIs whose state is fully rebuildable from flags (`make`, `kubectl` wrappers) |
+| In-process (`cobrax.NewMCPServer`) | Calls a command-tree factory, builds a fresh tree, then `ExecuteContext` | Commands whose closures hold non-serializable deps (DB handles, API clients) |
+
+The in-process model runs `root.ExecuteContext(context.WithoutCancel(ctx))`:
+when the AI runner cancels the context right after receiving the first result,
+in-flight I/O (e.g. an external API call) is not killed mid-side-effect.
+
+## Command Construction
+
+**Subprocess model:** the tool name is split on underscores, the first segment
+(root command name) is dropped, and the remaining segments form the command path:
+
+```bash
+/path/to/myapp get pods --namespace production --output json web-server
+```
+
+**In-process model:** the command path is pre-recorded at registration time
+(`toolPaths`), because tool names may be rewritten via `ToolNamePrefix` or contain
+characters that make name-splitting lossy.
+
+**Flag value conversion:**
+
+| Input value | CLI arguments |
+|-------------|---------------|
+| `true` | `--flag` |
+| `false` / `null` | omitted |
+| scalar | `--flag value` |
+| `["a", "b"]` | `--flag a --flag b` (repeated flag, pflag slice semantics) |
+| `{"k": "v"}` | `--flag k=v` (stringToString semantics) |
 
 ## Output
 
-All executions return:
-
-```json
-{
-  "stdout": "command output...",
-  "stderr": "error messages...",
-  "exitCode": 0
-}
-```
-
-Non-zero exit codes indicate command errors (not execution failures).
+Executions return stdout, stderr and the exit code. Non-zero exit codes are
+normalized into an MCP tool error (with the full output attached) — command
+business failures and execution failures are indistinguishable to the LLM, which
+can always read the complete output.
 
 ## Cancellation
 
-Execution can be cancelled by:
-- Middleware returning early without calling next
-- MCP client cancelling request
-- Parent context timeout
-
-Cancelled executions kill the subprocess and return an error.
+- Subprocess model: MCP client cancellation cancels the context, which kills the
+  child process and returns an error.
+- Middleware can short-circuit by returning early without calling `next`.
